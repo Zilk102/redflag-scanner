@@ -1,0 +1,77 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - app
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT}
+      DB_HOST: db
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      YANDEX_API_KEY: ${YANDEX_API_KEY}
+      YANDEX_CLOUD_API_KEY: ${YANDEX_CLOUD_API_KEY}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID}
+      YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID}
+      YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY}
+      YOOKASSA_RETURN_URL: ${YOOKASSA_RETURN_URL}
+    expose:
+      - "5000"
+    restart: unless-stopped
+    networks:
+      - app
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    expose:
+      - "80"
+    restart: unless-stopped
+    networks:
+      - app
+
+  nginx:
+    image: nginx:1.25-alpine
+    depends_on:
+      - client
+      - server
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+    networks:
+      - app
+
+volumes:
+  db_data:
+
+networks:
+  app:
+    driver: bridge
+
