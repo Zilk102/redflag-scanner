@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { AlertTriangle, CheckCircle, HeartCrack } from 'lucide-react';
 import { Helmet } from 'react-helmet-async';
@@ -356,12 +356,17 @@ export default function App() {
   const [text, setText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
+  const [isOcrLoading, setIsOcrLoading] = useState(false);
+  const [isDragActive, setIsDragActive] = useState(false);
   const [loadingLabelIndex, setLoadingLabelIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
   const [scanResult, setScanResult] = useState<ScanResponse | null>(null);
   const [isPaid, setIsPaid] = useState(false);
   const [thankYouOpen, setThankYouOpen] = useState(false);
+
+  const screenshotInputRef = useRef<HTMLInputElement | null>(null);
+  const ocrWorkerRef = useRef<unknown>(null);
 
   const ai = useMemo(() => parseAiVerdict(scanResult?.result), [scanResult]);
   const loadingLabels = useMemo(
@@ -428,8 +433,24 @@ export default function App() {
     window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
   }, [showToast]);
 
-  async function handleScan() {
-    const trimmed = text.trim();
+  useEffect(() => {
+    return () => {
+      const current = ocrWorkerRef.current as { terminate?: () => Promise<void> } | null;
+      current?.terminate?.();
+    };
+  }, []);
+
+  async function ensureOcrWorker() {
+    if (ocrWorkerRef.current) return ocrWorkerRef.current as { recognize: (image: File) => Promise<{ data?: { text?: string } }> };
+
+    const mod = await import('tesseract.js');
+    const worker = await mod.createWorker(['rus', 'eng']);
+    ocrWorkerRef.current = worker;
+    return worker as { recognize: (image: File) => Promise<{ data?: { text?: string } }> };
+  }
+
+  async function scanText(input: string) {
+    const trimmed = input.trim();
     const shortTextToastTitle = 'Слишком мало данных. Напиши подробнее!';
 
     if (!trimmed) {
@@ -512,6 +533,69 @@ export default function App() {
     }
   }
 
+  async function handleScan() {
+    await scanText(text);
+  }
+
+  async function handleScreenshotFiles(files: File[]) {
+    const images = files.filter((f) => f.type.startsWith('image/'));
+    if (images.length === 0) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Нужен файл-картинка',
+        message: 'Перетащи скриншот (PNG/JPG) или выбери файл через кнопку.',
+      });
+      return;
+    }
+
+    if (isOcrLoading || isLoading) return;
+
+    try {
+      setIsOcrLoading(true);
+      setError(null);
+
+      const worker = await ensureOcrWorker();
+      const parts: string[] = [];
+
+      for (const file of images) {
+        const result = await worker.recognize(file);
+        const extracted = typeof result?.data?.text === 'string' ? result.data.text.trim() : '';
+        if (extracted) parts.push(extracted);
+      }
+
+      const extractedText = parts.join('\n\n');
+      if (!extractedText) {
+        showToast({
+          id: crypto.randomUUID(),
+          tone: 'danger',
+          title: 'Не удалось распознать текст',
+          message: 'Попробуй другой скриншот или вставь переписку текстом.',
+        });
+        return;
+      }
+
+      const nextText = [text.trim(), extractedText].filter(Boolean).join('\n\n');
+      setText(nextText);
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'success',
+        title: 'Скриншот распознан',
+      });
+
+      await scanText(nextText);
+    } catch {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Ошибка распознавания',
+        message: 'Попробуй позже или вставь переписку текстом.',
+      });
+    } finally {
+      setIsOcrLoading(false);
+    }
+  }
+
   async function handlePayment() {
     if (isPaying) return;
 
@@ -590,7 +674,42 @@ export default function App() {
         </section>
 
         <section className="mt-10 grid gap-6">
-          <div className="rounded-3xl border border-white/10 bg-white/5 p-5 shadow-[0_0_48px_rgba(244,63,94,0.10)] backdrop-blur sm:p-8">
+          <div
+            className="relative rounded-3xl border border-white/10 bg-white/5 p-5 shadow-[0_0_48px_rgba(244,63,94,0.10)] backdrop-blur sm:p-8"
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDragActive(true);
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDragActive(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDragActive(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDragActive(false);
+              void handleScreenshotFiles(Array.from(e.dataTransfer.files));
+            }}
+          >
+            <input
+              ref={screenshotInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = e.target.files ? Array.from(e.target.files) : [];
+                e.target.value = '';
+                void handleScreenshotFiles(files);
+              }}
+            />
             <div className="grid gap-4">
               <div className="relative">
                 <textarea
@@ -602,15 +721,31 @@ export default function App() {
                 <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 rounded-b-2xl bg-gradient-to-t from-slate-950/85 to-transparent" />
               </div>
 
-              <button
-                type="button"
-                onClick={handleScan}
-                disabled={isLoading}
-                className="pulse-slow neon-shadow inline-flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-red-500 via-rose-500 to-fuchsia-500 px-6 py-5 text-sm font-black uppercase tracking-[0.18em] text-white shadow-[0_0_45px_rgba(244,63,94,0.25)] transition hover:brightness-110 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-60 sm:text-base"
-              >
-                {isLoading ? <Spinner /> : null}
-                <span>ПРОВЕРИТЬ НА RED FLAGS</span>
-              </button>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => screenshotInputRef.current?.click()}
+                  disabled={isOcrLoading || isLoading}
+                  className="inline-flex w-full items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-6 py-5 text-sm font-black uppercase tracking-[0.18em] text-white/90 transition hover:bg-white/10 active:bg-white/5 disabled:cursor-not-allowed disabled:opacity-60 sm:text-base"
+                >
+                  {isOcrLoading ? <Spinner className="h-5 w-5" /> : null}
+                  <span>ЗАГРУЗИТЬ СКРИНШОТ</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleScan}
+                  disabled={isLoading || isOcrLoading}
+                  className="pulse-slow neon-shadow inline-flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-red-500 via-rose-500 to-fuchsia-500 px-6 py-5 text-sm font-black uppercase tracking-[0.18em] text-white shadow-[0_0_45px_rgba(244,63,94,0.25)] transition hover:brightness-110 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-60 sm:text-base"
+                >
+                  {isLoading ? <Spinner /> : null}
+                  <span>ПРОВЕРИТЬ НА RED FLAGS</span>
+                </button>
+              </div>
+
+              <div className="text-center text-xs font-semibold uppercase tracking-[0.22em] text-white/55">
+                Можно просто перетащить скриншот сюда (drag & drop)
+              </div>
 
               {isLoading ? (
                 <div className="text-center text-xs font-semibold uppercase tracking-[0.22em] text-white/70">
@@ -625,6 +760,15 @@ export default function App() {
                 </div>
               ) : null}
             </div>
+
+            {isDragActive ? (
+              <div className="absolute inset-0 grid place-items-center rounded-3xl border border-white/10 bg-slate-950/70 p-6 backdrop-blur">
+                <div className="grid justify-items-center gap-2 text-center">
+                  <div className="text-sm font-black uppercase tracking-[0.18em] text-white">Отпусти скриншот сюда</div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">PNG / JPG / WEBP</div>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           {scanResult && ai ? <ResultsCard ai={ai} isPaid={isPaid} onPay={handlePayment} /> : null}
