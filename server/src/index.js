@@ -1,14 +1,15 @@
 require('dotenv').config();
 
 const { execSync } = require('child_process');
-const axios = require('axios');
 const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const YooKassa = require('yookassa');
 const { getPrismaClient } = require('./prismaClient');
 const { YandexGPTService } = require('./services/YandexGPTService');
 
-function getYooKassaAuthHeader() {
+function createYooKassaClient() {
   const shopId = process.env.YOOKASSA_SHOP_ID;
   const secretKey = process.env.YOOKASSA_SECRET_KEY;
 
@@ -24,35 +25,15 @@ function getYooKassaAuthHeader() {
     throw err;
   }
 
-  const token = Buffer.from(`${shopId}:${secretKey}`).toString('base64');
-  return `Basic ${token}`;
+  return new YooKassa({ shopId, secretKey });
 }
 
-async function yooKassaRequest(method, path, body, extraHeaders = {}) {
-  const authHeader = getYooKassaAuthHeader();
+let cachedYooKassaClient = null;
 
-  const response = await axios.request({
-    method,
-    url: `https://api.yookassa.ru${path}`,
-    headers: {
-      Authorization: authHeader,
-      'Content-Type': 'application/json',
-      ...extraHeaders,
-    },
-    data: body,
-    timeout: 30000,
-    validateStatus: () => true,
-  });
-
-  if (response.status >= 200 && response.status < 300) {
-    return response.data;
-  }
-
-  const details =
-    typeof response.data === 'string' ? response.data : JSON.stringify(response.data ?? null);
-  const err = new Error(`ЮKassa ошибка ${response.status}: ${details}`);
-  err.statusCode = 502;
-  throw err;
+function getYooKassaClient() {
+  if (cachedYooKassaClient) return cachedYooKassaClient;
+  cachedYooKassaClient = createYooKassaClient();
+  return cachedYooKassaClient;
 }
 
 function getYooKassaReturnUrl() {
@@ -62,6 +43,28 @@ function getYooKassaReturnUrl() {
   const err = new Error('YOOKASSA_RETURN_URL не задан');
   err.statusCode = 500;
   throw err;
+}
+
+function buildYooKassaReturnUrl(extraParams = {}) {
+  try {
+    const url = new URL(getYooKassaReturnUrl());
+
+    url.searchParams.set('payment', 'success');
+
+    if (typeof extraParams === 'object' && extraParams !== null) {
+      for (const [key, value] of Object.entries(extraParams)) {
+        if (typeof value === 'string' && value.trim()) {
+          url.searchParams.set(key, value.trim());
+        }
+      }
+    }
+
+    return url.toString();
+  } catch {
+    const err = new Error('YOOKASSA_RETURN_URL должен быть валидным URL');
+    err.statusCode = 500;
+    throw err;
+  }
 }
 
 function ensureDatabaseUrl() {
@@ -92,12 +95,40 @@ runPrismaMigrateDeploy();
 
 const app = express();
 
+app.set('trust proxy', 1);
+
+const defaultLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  limit: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ error: 'Слишком много запросов. Попробуй позже.' });
+  },
+});
+
+const scanLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: 'Слишком много сканирований. Приходи позже или купи безлимит.',
+    });
+  },
+});
+
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : true,
     credentials: true,
   }),
 );
+
+app.use(defaultLimiter);
 
 app.use(express.json({ limit: '2mb' }));
 
@@ -129,6 +160,106 @@ app.post('/api/analyze', async (req, res) => {
   });
 });
 
+app.post('/api/scan', scanLimiter, async (req, res, next) => {
+  try {
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    if (!text) {
+      const err = new Error('Поле text обязательно');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const yandex = new YandexGPTService();
+    const result = await yandex.scan(text);
+
+    const prisma = getPrismaClient();
+    const scan = await prisma.scan.create({
+      data: {
+        text,
+        result,
+      },
+    });
+
+    res.json({
+      id: scan.id,
+      text: scan.text,
+      result: scan.result,
+      createdAt: scan.createdAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/scan/:id', async (req, res, next) => {
+  try {
+    const id = typeof req.params?.id === 'string' ? req.params.id.trim() : '';
+    if (!id) {
+      const err = new Error('Поле id обязательно');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prisma = getPrismaClient();
+    const scan = await prisma.scan.findUnique({ where: { id } });
+    if (!scan) {
+      const err = new Error('Скан не найден');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    res.json({
+      id: scan.id,
+      text: scan.text,
+      result: scan.result,
+      createdAt: scan.createdAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/pay', async (req, res, next) => {
+  try {
+    const scanId = typeof req.body?.scanId === 'string' ? req.body.scanId.trim() : '';
+    const analysisId = typeof req.body?.analysisId === 'string' ? req.body.analysisId.trim() : '';
+
+    const idempotenceKey = crypto.randomUUID();
+
+    const metadata = {};
+    if (scanId) metadata.scanId = scanId;
+    if (analysisId) metadata.analysisId = analysisId;
+
+    const payment = await getYooKassaClient().createPayment(
+      {
+        amount: {
+          value: '149.00',
+          currency: 'RUB',
+        },
+        confirmation: {
+          type: 'redirect',
+          return_url: buildYooKassaReturnUrl({ scanId, analysisId }),
+        },
+        capture: true,
+        description: 'Оплата полного разбора',
+        metadata,
+      },
+      idempotenceKey,
+    );
+
+    const confirmationUrl = payment?.confirmation?.confirmation_url;
+    if (typeof confirmationUrl !== 'string' || !confirmationUrl) {
+      const err = new Error('ЮKassa не вернула ссылку на оплату');
+      err.statusCode = 502;
+      throw err;
+    }
+
+    res.json({ confirmation_url: confirmationUrl });
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.post('/api/payment/create', async (req, res, next) => {
   try {
     const analysisId = typeof req.body?.analysisId === 'string' ? req.body.analysisId.trim() : '';
@@ -154,9 +285,7 @@ app.post('/api/payment/create', async (req, res, next) => {
 
     const idempotenceKey = crypto.randomUUID();
 
-    const payment = await yooKassaRequest(
-      'POST',
-      '/v3/payments',
+    const payment = await getYooKassaClient().createPayment(
       {
         amount: {
           value: '149.00',
@@ -164,7 +293,7 @@ app.post('/api/payment/create', async (req, res, next) => {
         },
         confirmation: {
           type: 'redirect',
-          return_url: getYooKassaReturnUrl(),
+          return_url: buildYooKassaReturnUrl({ analysisId }),
         },
         capture: true,
         description: 'Оплата полного разбора',
@@ -172,7 +301,7 @@ app.post('/api/payment/create', async (req, res, next) => {
           analysisId,
         },
       },
-      { 'Idempotence-Key': idempotenceKey },
+      idempotenceKey,
     );
 
     const confirmationUrl = payment?.confirmation?.confirmation_url;
@@ -182,7 +311,7 @@ app.post('/api/payment/create', async (req, res, next) => {
       throw err;
     }
 
-    res.json({ confirmationUrl });
+    res.json({ confirmationUrl, confirmation_url: confirmationUrl });
   } catch (err) {
     next(err);
   }
@@ -205,7 +334,7 @@ app.post('/api/payment/webhook', async (req, res, next) => {
       throw err;
     }
 
-    const payment = await yooKassaRequest('GET', `/v3/payments/${encodeURIComponent(paymentId)}`);
+    const payment = await getYooKassaClient().getPayment(paymentId);
 
     if (payment?.status !== 'succeeded' || payment?.paid !== true) {
       res.json({ received: true });

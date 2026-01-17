@@ -17,3 +17,11 @@ model Analysis {
   @@map("analyses")
 }
 
+model Scan {
+  id        String   @id @default(uuid()) @db.Uuid
+  text      String
+  result    Json
+  createdAt DateTime @default(now())
+
+  @@map("scans")
+}

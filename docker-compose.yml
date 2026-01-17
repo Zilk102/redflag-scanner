@@ -45,26 +45,16 @@ services:
     networks:
       - app
 
-  client:
-    build:
-      context: ./client
-      dockerfile: Dockerfile
-    expose:
-      - "80"
-    restart: unless-stopped
-    networks:
-      - app
-
   nginx:
     image: nginx:1.25-alpine
     depends_on:
-      - client
       - server
     ports:
       - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    restart: unless-stopped
+      - ./client/dist:/usr/share/nginx/html:ro
+    restart: always
     networks:
       - app
 

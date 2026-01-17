@@ -1,15 +1,16 @@
 {
-  "name": "server",
+  "name": "redflag-scanner-server",
   "version": "1.0.0",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "seed": "node prisma/seed.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio"
   },
   "keywords": [],
-  "author": "",
+  "author": "RedFlag Scanner",
   "license": "ISC",
   "description": "",
   "dependencies": {
@@ -18,7 +19,11 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
     "pg": "^8.17.1",
+    "yookassa": "^0.1.1"
+  },
+  "devDependencies": {
     "prisma": "^6.19.2"
   }
 }
