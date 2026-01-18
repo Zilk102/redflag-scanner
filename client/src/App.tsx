@@ -232,6 +232,50 @@ function parseAiVerdict(result: unknown): AiVerdict | null {
 
     const normalizedFull = fullAnalysis.trim();
 
+    const baseRating = clamp(Math.round(rating), 0, 100);
+    const combinedText = `${typeof shortVerdict === 'string' ? shortVerdict : ''} ${typeof teaser === 'string' ? teaser : ''} ${normalizedFull}`
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const positiveMarkers = [
+      'всё хорошо',
+      'все хорошо',
+      'токсичности нет',
+      'нет токсичности',
+      'красных флагов нет',
+      'ред флагов нет',
+      'в порядке',
+      'всё ок',
+      'все ок',
+      'похоже норм',
+    ];
+
+    const negativeMarkers = [
+      'срочно беги',
+      'беги',
+      'опасно',
+      'токсично',
+      'токсичн',
+      'абьюз',
+      'газлайтинг',
+      'манипуля',
+      'шантаж',
+      'контроль',
+      'обесценив',
+      'ревност',
+      'давлен',
+    ];
+
+    const hasPositive = positiveMarkers.some((m) => combinedText.includes(m));
+    const hasNegative = negativeMarkers.some((m) => combinedText.includes(m));
+
+    const fixedRating = (() => {
+      if (hasPositive && !hasNegative && baseRating >= 70) return 100 - baseRating;
+      if (hasNegative && !hasPositive && baseRating <= 30) return 100 - baseRating;
+      return baseRating;
+    })();
+
     const derivedTeaser = (() => {
       const text = normalizedFull.replace(/\s+/g, ' ').trim();
       if (!text) return 'Есть проблема. И она только начинается…';
@@ -246,7 +290,7 @@ function parseAiVerdict(result: unknown): AiVerdict | null {
     })();
 
     return {
-      rating: clamp(Math.round(rating), 0, 100),
+      rating: fixedRating,
       short_verdict: shortVerdict.trim(),
       teaser: (typeof teaser === 'string' ? teaser : derivedTeaser).trim(),
       full_analysis: normalizedFull,
