@@ -645,43 +645,6 @@ function verifyTelegramLoginPayload(query) {
   };
 }
 
-app.post('/api/auth/telegram/login', authLimiter, requireCsrf(async (req, res, next) => {
-  try {
-    const payload = verifyTelegramLoginPayload(req.body);
-    const prisma = getPrismaClient();
-    const existing = await prisma.user.findUnique({ where: { telegramId: payload.telegramId } });
-    const user = existing
-      ? await prisma.user.update({
-          where: { id: existing.id },
-          data: {
-            telegramId: payload.telegramId,
-            telegramUsername: payload.telegramUsername,
-            telegramFirstName: payload.telegramFirstName,
-            telegramLastName: payload.telegramLastName,
-            telegramPhotoUrl: payload.telegramPhotoUrl,
-          },
-        })
-      : await prisma.user.create({
-          data: {
-            telegramId: payload.telegramId,
-            telegramUsername: payload.telegramUsername,
-            telegramFirstName: payload.telegramFirstName,
-            telegramLastName: payload.telegramLastName,
-            telegramPhotoUrl: payload.telegramPhotoUrl,
-          },
-        });
-
-    const { token } = await createSessionForUser({ req, user });
-    setSidCookie(req, res, token, getSessionTtlSeconds());
-    const csrfToken = makeCsrfToken();
-    setCsrfCookie(req, res, csrfToken, getCsrfTtlSeconds());
-
-    res.status(200).json({ ok: true, user: { id: user.id, label: buildUserLabel(user) }, csrfToken });
-  } catch (err) {
-    next(err);
-  }
-}));
-
 function buildUserLabel(user) {
   const username = typeof user.telegramUsername === 'string' ? user.telegramUsername.trim() : '';
   if (username) return `@${username}`;
@@ -1114,6 +1077,43 @@ app.get('/api/auth/csrf', authLimiter, async (req, res, next) => {
     next(err);
   }
 });
+
+app.post('/api/auth/telegram/login', authLimiter, requireCsrf(async (req, res, next) => {
+  try {
+    const payload = verifyTelegramLoginPayload(req.body);
+    const prisma = getPrismaClient();
+    const existing = await prisma.user.findUnique({ where: { telegramId: payload.telegramId } });
+    const user = existing
+      ? await prisma.user.update({
+          where: { id: existing.id },
+          data: {
+            telegramId: payload.telegramId,
+            telegramUsername: payload.telegramUsername,
+            telegramFirstName: payload.telegramFirstName,
+            telegramLastName: payload.telegramLastName,
+            telegramPhotoUrl: payload.telegramPhotoUrl,
+          },
+        })
+      : await prisma.user.create({
+          data: {
+            telegramId: payload.telegramId,
+            telegramUsername: payload.telegramUsername,
+            telegramFirstName: payload.telegramFirstName,
+            telegramLastName: payload.telegramLastName,
+            telegramPhotoUrl: payload.telegramPhotoUrl,
+          },
+        });
+
+    const { token } = await createSessionForUser({ req, user });
+    setSidCookie(req, res, token, getSessionTtlSeconds());
+    const csrfToken = makeCsrfToken();
+    setCsrfCookie(req, res, csrfToken, getCsrfTtlSeconds());
+
+    res.status(200).json({ ok: true, user: { id: user.id, label: buildUserLabel(user) }, csrfToken });
+  } catch (err) {
+    next(err);
+  }
+}));
 
 app.post('/api/auth/register', authLimiter, requireCsrf(async (req, res, next) => {
   try {
