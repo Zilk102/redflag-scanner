@@ -272,9 +272,11 @@ function parseCookieHeader(headerValue) {
 }
 
 function getSessionSecret() {
-  const secret = typeof process.env.SESSION_SECRET === 'string' ? process.env.SESSION_SECRET.trim() : '';
+  const primary = typeof process.env.SESSION_SECRET === 'string' ? process.env.SESSION_SECRET.trim() : '';
+  const fallback = typeof process.env.JWT_SECRET === 'string' ? process.env.JWT_SECRET.trim() : '';
+  const secret = primary || fallback;
   if (!secret) {
-    const err = new Error('SESSION_SECRET не задан');
+    const err = new Error('SESSION_SECRET не задан (можно также задать JWT_SECRET для совместимости)');
     err.statusCode = 500;
     throw err;
   }

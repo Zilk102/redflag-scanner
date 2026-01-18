@@ -28,6 +28,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: ${PORT}
+      SESSION_SECRET: ${SESSION_SECRET:-}
       DB_HOST: db
       DB_PORT: "5432"
       POSTGRES_USER: ${POSTGRES_USER}
