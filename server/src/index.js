@@ -583,6 +583,20 @@ function requireAuth(handler) {
   };
 }
 
+function optionalAuth(handler) {
+  return async (req, res, next) => {
+    try {
+      const ctx = await getAuthContext(req);
+      if (ctx) {
+        req.auth = { userId: ctx.user.id, email: ctx.user.email, sessionId: ctx.session.id };
+      }
+      await handler(req, res, next);
+    } catch (err) {
+      next(err);
+    }
+  };
+}
+
 function makeShareId() {
   return crypto.randomBytes(16).toString('hex');
 }
@@ -1341,7 +1355,7 @@ app.post(
 app.post(
   '/api/scan',
   scanLimiter,
-  requireAuth(requireCsrf(async (req, res) => {
+  optionalAuth(requireCsrf(async (req, res) => {
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
     const consent = req.body?.consent === true;
     const anonymization = normalizeAnonymizationOptions(req.body?.anonymization);
@@ -1374,7 +1388,7 @@ app.post(
         consentAt: new Date(),
         autoDeleteAt: computeAutoDeleteAt({ retentionHours }),
         anonymization,
-        userId: req.auth.userId,
+        userId: req.auth?.userId ?? null,
         shareId: makeShareId(),
         isPublic: true,
       },

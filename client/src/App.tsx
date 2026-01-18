@@ -741,6 +741,7 @@ export default function App() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [isAuthBusy, setIsAuthBusy] = useState(false);
+  const [authPanelOpen, setAuthPanelOpen] = useState(false);
   const [loadingLabelIndex, setLoadingLabelIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
@@ -968,6 +969,7 @@ export default function App() {
       if (nextCsrf) applyCsrfToken(nextCsrf);
       setAuthUser(u);
       setAuthPassword('');
+      setAuthPanelOpen(false);
       showToast({
         id: crypto.randomUUID(),
         tone: 'success',
@@ -1013,16 +1015,6 @@ export default function App() {
   async function scanText(input: string) {
     const trimmed = input.trim();
     const shortTextToastTitle = 'Слишком мало данных. Напиши подробнее!';
-
-    if (!authUser) {
-      showToast({
-        id: crypto.randomUUID(),
-        tone: 'danger',
-        title: 'Нужна авторизация',
-        message: 'Войди или зарегистрируйся, чтобы создать отчёт и управлять им.',
-      });
-      return;
-    }
 
     if (!consentAccepted) {
       showToast({
@@ -1206,6 +1198,8 @@ export default function App() {
         title: 'Нужна авторизация',
         message: 'Войди, чтобы оплатить и открыть полный отчёт.',
       });
+      setAuthMode('login');
+      setAuthPanelOpen(true);
       return;
     }
 
@@ -1409,6 +1403,8 @@ export default function App() {
         title: 'Нужна авторизация',
         message: 'Войди, чтобы задавать вопросы по отчёту.',
       });
+      setAuthMode('login');
+      setAuthPanelOpen(true);
       return;
     }
 
@@ -1444,6 +1440,8 @@ export default function App() {
         title: 'Нужна авторизация',
         message: 'Войди, чтобы удалять свои отчёты.',
       });
+      setAuthMode('login');
+      setAuthPanelOpen(true);
       setDeleteConfirmOpen(false);
       return;
     }
@@ -1581,58 +1579,80 @@ export default function App() {
               ) : (
                 <div className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Авторизация</div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setAuthMode('login')}
-                        className={[
-                          'rounded-xl px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition',
-                          authMode === 'login' ? 'bg-white/10 text-white' : 'bg-transparent text-white/60 hover:bg-white/5',
-                        ].join(' ')}
-                      >
-                        Вход
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setAuthMode('register')}
-                        className={[
-                          'rounded-xl px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition',
-                          authMode === 'register' ? 'bg-white/10 text-white' : 'bg-transparent text-white/60 hover:bg-white/5',
-                        ].join(' ')}
-                      >
-                        Регистрация
-                      </button>
+                    <div className="text-sm font-semibold text-white/85">
+                      Хочешь сохранять отчёты и открывать полный разбор? Войди.
                     </div>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <input
-                      value={authEmail}
-                      onChange={(e) => setAuthEmail(e.target.value)}
-                      placeholder="email"
-                      className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
-                      autoComplete="email"
-                    />
-                    <input
-                      value={authPassword}
-                      onChange={(e) => setAuthPassword(e.target.value)}
-                      placeholder="пароль"
-                      type="password"
-                      className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
-                      autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
-                    />
                     <button
                       type="button"
-                      onClick={() => {
-                        void handleAuthSubmit();
-                      }}
-                      disabled={isAuthBusy}
-                      className="inline-flex items-center justify-center rounded-xl bg-white/10 px-4 py-3 text-xs font-black uppercase tracking-[0.14em] text-white transition hover:bg-white/15 active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+                      onClick={() => setAuthPanelOpen((v) => !v)}
+                      className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-xs font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
                     >
-                      {isAuthBusy ? '...' : authMode === 'register' ? 'Создать' : 'Войти'}
+                      {authPanelOpen ? 'Скрыть' : 'Войти / Регистрация'}
                     </button>
                   </div>
+
+                  {authPanelOpen ? (
+                    <div className="grid gap-3">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setAuthMode('login')}
+                          className={[
+                            'rounded-xl px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition',
+                            authMode === 'login'
+                              ? 'bg-white/10 text-white'
+                              : 'bg-transparent text-white/60 hover:bg-white/5',
+                          ].join(' ')}
+                        >
+                          Вход
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAuthMode('register')}
+                          className={[
+                            'rounded-xl px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition',
+                            authMode === 'register'
+                              ? 'bg-white/10 text-white'
+                              : 'bg-transparent text-white/60 hover:bg-white/5',
+                          ].join(' ')}
+                        >
+                          Регистрация
+                        </button>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        <input
+                          value={authEmail}
+                          onChange={(e) => setAuthEmail(e.target.value)}
+                          placeholder="email"
+                          className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
+                          autoComplete="email"
+                        />
+                        <input
+                          value={authPassword}
+                          onChange={(e) => setAuthPassword(e.target.value)}
+                          placeholder="пароль"
+                          type="password"
+                          className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
+                          autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleAuthSubmit();
+                          }}
+                          disabled={isAuthBusy}
+                          className="inline-flex items-center justify-center rounded-xl bg-white/10 px-4 py-3 text-xs font-black uppercase tracking-[0.14em] text-white transition hover:bg-white/15 active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isAuthBusy ? '...' : authMode === 'register' ? 'Создать' : 'Войти'}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/55">
+                      Скан доступен без аккаунта
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1660,7 +1680,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleScan}
-                  disabled={isLoading || isOcrLoading || !authUser}
+                  disabled={isLoading || isOcrLoading}
                   className="pulse-slow neon-shadow inline-flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-red-500 via-rose-500 to-fuchsia-500 px-6 py-5 text-sm font-black uppercase tracking-[0.18em] text-white shadow-[0_0_45px_rgba(244,63,94,0.25)] transition hover:brightness-110 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-60 sm:text-base"
                 >
                   {isLoading ? <Spinner /> : null}
