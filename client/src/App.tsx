@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { AlertTriangle, CheckCircle, HeartCrack } from 'lucide-react';
 import { Helmet } from 'react-helmet-async';
-import { initMetrika, reachGoal } from './utils/analytics';
+import { reachGoal } from './utils/analytics';
 
 type ScanResponse = {
   id: string;
@@ -378,10 +378,6 @@ export default function App() {
     () => ['Анализируем токсичность...', 'Ищем красные флаги...', 'Связываемся с базой бывших...'],
     [],
   );
-
-  useEffect(() => {
-    initMetrika();
-  }, []);
 
   useEffect(() => {
     if (!isLoading) return;
