@@ -108,85 +108,6 @@ function anonymizeText(input: string) {
     .replace(/@([\p{L}0-9_]{2,})/giu, '@***');
 }
 
-function normalizeOcrText(raw: string) {
-  const base = String(raw ?? '')
-    .replace(/\r\n?/g, '\n')
-    .replaceAll('\u0000', '')
-    .replaceAll('\u200B', '')
-    .replaceAll('\uFEFF', '')
-    .replace(/[\t\f\v\u00A0]+/g, ' ');
-
-  const noisyPhrases = [
-    'закрепл',
-    'был(а) недавно',
-    'был(а) в сети',
-    'в сети',
-    'online',
-    'last seen',
-    'печатает',
-    'typing',
-    'позвонить',
-    'видеозвонок',
-  ];
-
-  const lines = base
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .filter((line) => {
-      const low = line.toLowerCase();
-      return !noisyPhrases.some((p) => low.includes(p));
-    })
-    .map((line) => line.replace(/\s{2,}/g, ' ').trim())
-    .map((line) => {
-      const m = line.match(/^(\d{1,2}:\d{2})\b(.*)$/);
-      if (!m) return line;
-      const time = m[1];
-      const rest = (m[2] ?? '').trim();
-      if (!rest) return time;
-
-      const letters = (rest.match(/[\p{L}]/gu) ?? []).length;
-      const digits = (rest.match(/[\p{N}]/gu) ?? []).length;
-      const keepRest = letters >= 3 || (letters >= 2 && digits >= 2);
-      return keepRest ? `${time} ${rest}` : time;
-    })
-    .filter((line) => {
-      const letters = (line.match(/[\p{L}]/gu) ?? []).length;
-      const digits = (line.match(/[\p{N}]/gu) ?? []).length;
-      if (/^\d{1,2}:\d{2}\b/.test(line)) return true;
-      if (letters >= 3) return true;
-      if (letters >= 2 && digits >= 2) return true;
-      return false;
-    });
-
-  const merged: string[] = [];
-  for (const line of lines) {
-    const prev = merged[merged.length - 1];
-    if (!prev) {
-      merged.push(line);
-      continue;
-    }
-
-    const prevEnds = /[.!?…:]$/.test(prev);
-    const nextStartsLower = /^[\p{Ll}]/u.test(line);
-    const nextLooksNew = /^\d{1,2}:\d{2}\b/.test(line);
-
-    if (!prevEnds && nextStartsLower && !nextLooksNew) {
-      merged[merged.length - 1] = `${prev} ${line}`;
-      continue;
-    }
-
-    merged.push(line);
-  }
-
-  const joined = merged.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  if (joined.length <= 12000) return joined;
-
-  const cut = joined.slice(0, 12000);
-  const idx = cut.lastIndexOf('\n');
-  return (idx > 2000 ? cut.slice(0, idx) : cut).trim();
-}
-
 async function preprocessImageForOcr(file: File) {
   const maxSide = 2400;
   const baseScale = 2.4;
@@ -1031,7 +952,6 @@ export default function App() {
   const [isAsking, setIsAsking] = useState(false);
 
   const screenshotInputRef = useRef<HTMLInputElement | null>(null);
-  const ocrWorkerRef = useRef<unknown>(null);
 
   const csrfTokenRef = useRef('');
   const csrfInFlightRef = useRef<Promise<string> | null>(null);
@@ -1291,13 +1211,6 @@ export default function App() {
     if (isPaymentSuccess) resetUrlParams(['payment', 'shareId', 'analysisId']);
   }, [loadScanById, resetUrlParams, showToast]);
 
-  useEffect(() => {
-    return () => {
-      const current = ocrWorkerRef.current as { terminate?: () => Promise<void> } | null;
-      current?.terminate?.();
-    };
-  }, []);
-
   const handleLogout = useCallback(async () => {
     if (isAuthBusy) return;
     try {
@@ -1313,24 +1226,6 @@ export default function App() {
       setIsAuthBusy(false);
     }
   }, [applyCsrfToken, ensureCsrfToken, isAuthBusy]);
-
-  async function ensureOcrWorker() {
-    if (ocrWorkerRef.current) return ocrWorkerRef.current as { recognize: (image: File) => Promise<{ data?: { text?: string } }> };
-
-    const mod = await import('tesseract.js');
-    const worker = await mod.createWorker(['rus', 'eng']);
-    const psm = typeof (mod as unknown as { PSM?: Record<string, unknown> }).PSM === 'object' &&
-      (mod as unknown as { PSM?: Record<string, unknown> }).PSM !== null &&
-      typeof (mod as unknown as { PSM: { SPARSE_TEXT?: unknown } }).PSM.SPARSE_TEXT === 'number'
-      ? (mod as unknown as { PSM: { SPARSE_TEXT: number } }).PSM.SPARSE_TEXT
-      : 11;
-    await (worker as unknown as { setParameters?: (p: Record<string, unknown>) => Promise<void> }).setParameters?.({
-      tessedit_pageseg_mode: psm,
-      preserve_interword_spaces: '1',
-    });
-    ocrWorkerRef.current = worker;
-    return worker as { recognize: (image: File) => Promise<{ data?: { text?: string } }> };
-  }
 
   async function scanText(input: string) {
     const trimmed = input.trim();
@@ -1467,30 +1362,20 @@ export default function App() {
       setIsOcrLoading(true);
       setError(null);
 
-      const worker = await ensureOcrWorker();
+      await ensureCsrfToken();
       const parts: string[] = [];
 
       for (const file of images) {
         const preprocessed = await preprocessImageForOcr(file);
-        let extracted = '';
-
-        try {
-          await ensureCsrfToken();
-          const bytes = await preprocessed.arrayBuffer();
-          const response = await axios.post<{ text?: string }>('/api/ocr', bytes, {
-            headers: {
-              'Content-Type': preprocessed.type,
-              'X-Consent': 'true',
-            },
-            timeout: 45000,
-          });
-          extracted = normalizeOcrText(typeof response.data?.text === 'string' ? response.data.text : '');
-        } catch {
-          const result = await worker.recognize(preprocessed);
-          const extractedRaw = typeof result?.data?.text === 'string' ? result.data.text : '';
-          extracted = normalizeOcrText(extractedRaw);
-        }
-
+        const bytes = await preprocessed.arrayBuffer();
+        const response = await axios.post<{ text?: string }>('/api/ocr', bytes, {
+          headers: {
+            'Content-Type': preprocessed.type,
+            'X-Consent': 'true',
+          },
+          timeout: 45000,
+        });
+        const extracted = typeof response.data?.text === 'string' ? response.data.text.trim() : '';
         if (extracted) parts.push(extracted);
       }
 

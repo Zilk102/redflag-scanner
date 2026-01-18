@@ -272,6 +272,340 @@ function sanitizeTextForAi(input) {
   return normalized.slice(normalized.length - maxChars).trim();
 }
 
+function sanitizeTextForUi(input) {
+  const base = String(input ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u0000/g, '')
+    .replace(/[\u200B\uFEFF]/g, '')
+    .replace(/[\t\f\v\u00A0]+/g, ' ')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (!base) return '';
+
+  const lines = base.split('\n');
+  const out = [];
+
+  for (const line of lines) {
+    const t = String(line ?? '').trim();
+    if (!t) {
+      out.push('');
+      continue;
+    }
+    if (!/[\p{L}\p{N}]/u.test(t) && t.length <= 2) continue;
+    out.push(t.replace(/\s{2,}/g, ' '));
+  }
+
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function normalizeTranscriptForAi(input) {
+  const cleaned = sanitizeTextForAi(input);
+  if (!cleaned) return '';
+
+  function compactSpeakers(lines) {
+    const map = new Map();
+    let nextIndex = 0;
+    const out = [];
+
+    for (const item of lines) {
+      const name = String(item?.name ?? '').trim();
+      const message = String(item?.message ?? '').trim();
+      if (!message) continue;
+
+      let label = '';
+      if (name) {
+        const existing = map.get(name);
+        if (existing) {
+          label = existing;
+        } else {
+          nextIndex += 1;
+          label = nextIndex <= 26 ? String.fromCharCode(64 + nextIndex) : `U${nextIndex}`;
+          map.set(name, label);
+        }
+      }
+
+      out.push(label ? `${label}: ${message}` : message);
+    }
+
+    return sanitizeTextForAi(out.join('\n'));
+  }
+
+  const asDialogue = sanitizeTextForAi(formatOcrDialogue(cleaned, 'auto'));
+  if (asDialogue) {
+    const dialogueLines = asDialogue
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => /^\d{1,2}:\d{2}\s*-\s*[^:]{1,60}:\s*\S/u.test(l));
+    if (dialogueLines.length >= 2) {
+      const parsed = [];
+      for (const line of dialogueLines) {
+        const m = line.match(/^\d{1,2}:\d{2}\s*-\s*([^:]{1,60}):\s*(.+)$/u);
+        if (!m) continue;
+        parsed.push({ name: m[1], message: m[2] });
+      }
+      const compact = compactSpeakers(parsed);
+      if (compact) return compact;
+      return sanitizeTextForAi(dialogueLines.join('\n'));
+    }
+  }
+
+  const baseLines = cleaned
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const nameColonLines = baseLines.filter((l) => /^[\p{L}][\p{L}\p{M}\p{N} _.'’-]{1,39}:\s*\S/iu.test(l));
+  if (nameColonLines.length >= 2) {
+    const parsed = [];
+    for (const line of nameColonLines) {
+      const m = line.match(/^([^:]{1,60}):\s*(.+)$/u);
+      if (!m) continue;
+      parsed.push({ name: m[1], message: m[2] });
+    }
+    const compact = compactSpeakers(parsed);
+    if (compact) return compact;
+    return sanitizeTextForAi(nameColonLines.join('\n'));
+  }
+
+  const noisy = [
+    'закрепл',
+    'закреплённое',
+    'закрепленное',
+    'закреплено',
+    'был(а) недавно',
+    'был(а) в сети',
+    'в сети',
+    'online',
+    'last seen',
+    'печатает',
+    'typing',
+    'сообщения и звонки защищены',
+    'end-to-end encrypted',
+    'наберите сообщение',
+    'message',
+  ];
+
+  const filtered = baseLines.filter((line) => {
+    const low = line.toLowerCase();
+    if (noisy.some((p) => low.includes(p))) return false;
+    if (low === 'сегодня' || low === 'вчера' || low === 'today' || low === 'yesterday') return false;
+    if (/^\d{1,2}[./]\d{1,2}[./]\d{2,4}$/u.test(line)) return false;
+    if (/^\d{1,2}\s+[\p{L}]{3,}\s+\d{4}$/u.test(line)) return false;
+    if (/^\d{1,2}\s+[\p{L}]{3,}$/u.test(line)) return false;
+    if (/^\d{1,2}:\d{2}$/u.test(line)) return false;
+    return true;
+  });
+
+  if (filtered.length >= 2) return sanitizeTextForAi(filtered.join('\n'));
+  return cleaned;
+}
+
+function normalizeOcrLines(raw) {
+  const base = String(raw ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u0000/g, '')
+    .replace(/[\u200B\uFEFF]/g, '')
+    .replace(/[\t\f\v\u00A0]+/g, ' ');
+
+  const noisyPhrases = [
+    'закрепл',
+    'закреплённое',
+    'закрепленное',
+    'закреплено',
+    'был(а) недавно',
+    'был(а) в сети',
+    'в сети',
+    'online',
+    'last seen',
+    'печатает',
+    'typing',
+    'позвонить',
+    'видеозвонок',
+    'сообщения и звонки защищены',
+    'end-to-end encrypted',
+  ];
+
+  return base
+    .split('\n')
+    .map((l) => String(l ?? '').trim())
+    .filter(Boolean)
+    .filter((line) => {
+      const low = line.toLowerCase();
+      return !noisyPhrases.some((p) => low.includes(p));
+    })
+    .map((line) => line.replace(/\s{2,}/g, ' ').trim());
+}
+
+function detectChatApp({ raw, lines }) {
+  const rawLow = String(raw ?? '').toLowerCase();
+  const startTimeCount = lines.filter((l) => /^\d{1,2}:\d{2}\b/u.test(l)).length;
+  const endTimeCount = lines.filter((l) => /\b\d{1,2}:\d{2}$/u.test(l)).length;
+  const total = Math.max(1, lines.length);
+
+  if (startTimeCount >= 2 && startTimeCount >= endTimeCount) return 'telegram';
+  if (endTimeCount >= 2 && endTimeCount >= startTimeCount) return 'whatsapp';
+
+  if (rawLow.includes('закрепл')) return 'telegram';
+  if (rawLow.includes('сообщения и звонки защищены') || rawLow.includes('end-to-end encrypted')) return 'whatsapp';
+
+  if (startTimeCount / total >= 0.18) return 'telegram';
+  if (endTimeCount / total >= 0.18) return 'whatsapp';
+  return 'telegram';
+}
+
+function formatOcrDialogue(raw, mode = 'auto') {
+  const lines = normalizeOcrLines(raw);
+  if (lines.length === 0) return '';
+
+  const effectiveMode = mode === 'auto' ? detectChatApp({ raw, lines }) : mode;
+
+  function countLetters(value) {
+    return (String(value).match(/[\p{L}]/gu) ?? []).length;
+  }
+
+  function countDigits(value) {
+    return (String(value).match(/[\p{N}]/gu) ?? []).length;
+  }
+
+  function lettersRatio(value) {
+    const compact = String(value).replace(/\s+/g, '');
+    if (!compact) return 0;
+    return countLetters(compact) / compact.length;
+  }
+
+  function looksLikeName(value) {
+    const v = String(value ?? '').trim();
+    if (!v) return false;
+    if (v.length > 40) return false;
+    const low = v.toLowerCase();
+    if (low.includes('http')) return false;
+    if (countLetters(v) < 4) return false;
+    if (countDigits(v) > 1) return false;
+    if (lettersRatio(v) < 0.62) return false;
+    const words = v.split(/\s+/).filter(Boolean);
+    if (words.length > 4) return false;
+    if (!/^[\p{Lu}]/u.test(v)) return false;
+    if (/[^\p{L}\p{M}\p{N} _.'’-]/u.test(v)) return false;
+    return true;
+  }
+
+  function isDaySeparator(value) {
+    const v = String(value ?? '').trim();
+    if (!v) return false;
+    const low = v.toLowerCase();
+    if (low === 'сегодня' || low === 'вчера' || low === 'today' || low === 'yesterday') return true;
+    if (/^\d{1,2}[./]\d{1,2}[./]\d{2,4}$/u.test(v)) return true;
+    if (/^\d{1,2}\s+[\p{L}]{3,}\s+\d{4}$/u.test(v)) return true;
+    if (/^\d{1,2}\s+[\p{L}]{3,}$/u.test(v)) return true;
+    return false;
+  }
+
+  if (effectiveMode === 'whatsapp') {
+    const formatted = [];
+    let buffer = [];
+    let lastPossibleName = '';
+
+    for (const line of lines) {
+      if (isDaySeparator(line)) continue;
+
+      const m = String(line).match(/^(.*?)(\b\d{1,2}:\d{2})$/u);
+      if (!m) {
+        if (looksLikeName(line)) {
+          lastPossibleName = line;
+          continue;
+        }
+        buffer.push(line);
+        continue;
+      }
+
+      const before = String(m[1] ?? '').trim();
+      const time = String(m[2] ?? '').trim();
+      const collected = buffer.concat(before).map((x) => String(x).trim()).filter(Boolean);
+      buffer = [];
+
+      if (!time) continue;
+      if (collected.length === 0) continue;
+
+      let name = '';
+      let message = '';
+
+      const first = collected[0] ?? '';
+      const inline = first.match(/^([^:]{2,40}):\s*(.+)$/);
+      if (inline && looksLikeName(inline[1])) {
+        name = String(inline[1]).trim();
+        const rest = [String(inline[2]).trim()].concat(collected.slice(1));
+        message = rest.join(' ').replace(/\s{2,}/g, ' ').trim();
+      } else {
+        const candidateName = lastPossibleName && looksLikeName(lastPossibleName) ? lastPossibleName : '';
+        name = candidateName;
+        message = collected.join(' ').replace(/\s{2,}/g, ' ').trim();
+      }
+
+      lastPossibleName = '';
+      if (!message) continue;
+      formatted.push(`${time} - ${name || 'Собеседник'}: ${message}`);
+    }
+
+    return formatted.join('\n').trim();
+  }
+
+  const blocks = [];
+  let current = null;
+
+  for (const line of lines) {
+    const m = String(line).match(/^(\d{1,2}:\d{2})\b\s*(.*)$/);
+    if (m) {
+      if (current) blocks.push(current);
+      const time = m[1];
+      const restRaw = String(m[2] ?? '').trim();
+      const letters = (restRaw.match(/[\p{L}]/gu) ?? []).length;
+      const digits = (restRaw.match(/[\p{N}]/gu) ?? []).length;
+      const keepRest = letters >= 4 || (letters >= 3 && digits >= 2);
+      const rest = keepRest ? restRaw : '';
+      current = { time, lines: rest ? [rest] : [] };
+      continue;
+    }
+    if (!current) continue;
+    current.lines.push(String(line).trim());
+  }
+  if (current) blocks.push(current);
+
+  const formatted = [];
+  for (const block of blocks) {
+    const time = String(block.time ?? '').trim();
+    if (!time) continue;
+    const rawLines = Array.isArray(block.lines) ? block.lines.map((l) => String(l ?? '').trim()).filter(Boolean) : [];
+    if (rawLines.length === 0) continue;
+
+    let name = '';
+    const msgLines = [];
+    const first = rawLines[0] ?? '';
+    const inline = first.match(/^([^:]{2,40}):\s*(.+)$/);
+    if (inline && looksLikeName(inline[1])) {
+      name = String(inline[1]).trim();
+      msgLines.push(String(inline[2]).trim());
+      msgLines.push(...rawLines.slice(1));
+    } else if (looksLikeName(first) && rawLines.length >= 2) {
+      name = first;
+      msgLines.push(...rawLines.slice(1));
+    } else {
+      msgLines.push(...rawLines);
+    }
+
+    const message = msgLines
+      .join(' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    if (!message) continue;
+    formatted.push(`${time} - ${name || 'Собеседник'}: ${message}`);
+  }
+
+  return formatted.join('\n').trim();
+}
+
 function computeAutoDeleteAt({ retentionHours }) {
   if (retentionHours === null) return null;
   const ms = retentionHours * 60 * 60 * 1000;
@@ -1186,7 +1520,8 @@ app.post(
 
     try {
       const raw = await runTesseractOcr({ buffer: body });
-      const text = sanitizeTextForAi(raw);
+      const formatted = formatOcrDialogue(raw);
+      const text = sanitizeTextForUi(formatted || raw);
       res.status(200).json({ text });
     } catch {
       const err = new Error('Не удалось распознать текст');
@@ -1585,7 +1920,7 @@ app.post(
       return;
     }
 
-    const textForAi = anonymizeText(sanitizeTextForAi(text), anonymization);
+    const textForAi = anonymizeText(normalizeTranscriptForAi(text), anonymization);
     const result = await yandex.analyzeText(textForAi);
 
     const prisma = getPrismaClient();
@@ -1638,7 +1973,7 @@ app.post(
       throw err;
     }
 
-    const textForAi = anonymizeText(sanitizeTextForAi(text), anonymization);
+    const textForAi = anonymizeText(normalizeTranscriptForAi(text), anonymization);
     const result = await yandex.scan(textForAi);
 
     const prisma = getPrismaClient();
