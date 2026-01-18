@@ -541,7 +541,7 @@ function ResultsCard({
       <div
         className={[
           'relative rounded-3xl border border-white/10 bg-deep-bg/55 p-6',
-          !isPaid ? 'min-h-[260px]' : '',
+          !isPaid ? 'min-h-72' : '',
         ].join(' ')}
       >
         <div className={[!isPaid ? 'blur-md select-none' : '', 'transition'].join(' ')}>
@@ -552,7 +552,7 @@ function ResultsCard({
         </div>
 
         {!isPaid ? (
-          <div className="absolute inset-0 grid place-items-center rounded-3xl bg-deep-bg/30 p-6">
+          <div className="absolute inset-0 grid min-h-72 place-items-center rounded-3xl bg-deep-bg/30 p-6">
             <div className="grid w-full max-w-md justify-items-center gap-3 text-center">
               <button
                 type="button"
