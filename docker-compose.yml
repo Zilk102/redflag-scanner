@@ -55,8 +55,6 @@ services:
 
   nginx:
     image: nginx:1.25-alpine
-    profiles:
-      - edge
     depends_on:
       - server
     ports:
