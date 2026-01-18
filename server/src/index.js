@@ -334,21 +334,41 @@ function normalizeTranscriptForAi(input) {
 
   const asDialogue = sanitizeTextForAi(formatOcrDialogue(cleaned, 'auto'));
   if (asDialogue) {
-    const dialogueLines = asDialogue
+    const asDialogueLines = asDialogue
       .split('\n')
       .map((l) => l.trim())
-      .filter(Boolean)
-      .filter((l) => /^\d{1,2}:\d{2}\s*-\s*[^:]{1,60}:\s*\S/u.test(l));
-    if (dialogueLines.length >= 2) {
-      const parsed = [];
-      for (const line of dialogueLines) {
-        const m = line.match(/^\d{1,2}:\d{2}\s*-\s*([^:]{1,60}):\s*(.+)$/u);
-        if (!m) continue;
+      .filter(Boolean);
+
+    const parsed = [];
+    let matchedCount = 0;
+    for (const line of asDialogueLines) {
+      const m = line.match(/^(?:\d{1,2}:\d{2}|\?\?:\?\?)\s*-\s*([^:]{1,60}):\s*(.+)$/u);
+      if (m) {
+        matchedCount += 1;
         parsed.push({ name: m[1], message: m[2] });
+        continue;
       }
+      if (parsed.length > 0) {
+        parsed[parsed.length - 1].message = `${String(parsed[parsed.length - 1].message ?? '').trim()} ${line}`.trim();
+      } else {
+        parsed.push({ name: '', message: line });
+      }
+    }
+
+    if (matchedCount >= 2) {
       const compact = compactSpeakers(parsed);
       if (compact) return compact;
-      return sanitizeTextForAi(dialogueLines.join('\n'));
+      return sanitizeTextForAi(
+        parsed
+          .map((x) => {
+            const name = String(x?.name ?? '').trim();
+            const message = String(x?.message ?? '').trim();
+            if (!message) return '';
+            return name ? `${name}: ${message}` : message;
+          })
+          .filter(Boolean)
+          .join('\n'),
+      );
     }
   }
 
@@ -426,6 +446,8 @@ function normalizeOcrLines(raw) {
     'видеозвонок',
     'сообщения и звонки защищены',
     'end-to-end encrypted',
+    'наберите сообщение',
+    'напишите сообщение',
   ];
 
   return base
@@ -441,8 +463,10 @@ function normalizeOcrLines(raw) {
 
 function detectChatApp({ raw, lines }) {
   const rawLow = String(raw ?? '').toLowerCase();
-  const startTimeCount = lines.filter((l) => /^\d{1,2}:\d{2}\b/u.test(l)).length;
-  const endTimeCount = lines.filter((l) => /\b\d{1,2}:\d{2}$/u.test(l)).length;
+  const startTimeCount = lines.filter((l) => /^(?:\d{1,2}\s*[:.]\s*\d{2}|\d{3,4})\b/u.test(l)).length;
+  const endTimeCount = lines.filter((l) =>
+    /\b(?:\d{1,2}\s*[:.]\s*\d{2}|\d{3,4})(?:[^\p{L}\p{N}]{0,6}|[^\p{L}\p{N}]{0,4}\p{L}[^\p{L}\p{N}]{0,2})$/u.test(l),
+  ).length;
   const total = Math.max(1, lines.length);
 
   if (startTimeCount >= 2 && startTimeCount >= endTimeCount) return 'telegram';
@@ -456,11 +480,79 @@ function detectChatApp({ raw, lines }) {
   return 'telegram';
 }
 
-function formatOcrDialogue(raw, mode = 'auto') {
-  const lines = normalizeOcrLines(raw);
+function formatOcrDialogue(raw, mode = 'auto', options = {}) {
+  const noisyPhrases = [
+    'закрепл',
+    'закреплённое',
+    'закрепленное',
+    'закреплено',
+    'был(а) недавно',
+    'был(а) в сети',
+    'в сети',
+    'online',
+    'last seen',
+    'печатает',
+    'typing',
+    'позвонить',
+    'видеозвонок',
+    'сообщения и звонки защищены',
+    'end-to-end encrypted',
+    'наберите сообщение',
+    'напишите сообщение',
+  ];
+
+  function normalizeOcrRichLines(items) {
+    const base = Array.isArray(items) ? items : [];
+    const out = [];
+    for (const item of base) {
+      const t0 = String(item?.text ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\u0000/g, '')
+        .replace(/[\u200B\uFEFF]/g, '')
+        .replace(/[\t\f\v\u00A0]+/g, ' ')
+        .trim();
+      if (!t0) continue;
+      const low = t0.toLowerCase();
+      if (noisyPhrases.some((p) => low.includes(p))) continue;
+      out.push({
+        text: t0.replace(/\s{2,}/g, ' ').trim(),
+        side: item?.side === 'left' || item?.side === 'right' ? item.side : null,
+        top: Number.isFinite(item?.top) ? item.top : null,
+        bottom: Number.isFinite(item?.bottom) ? item.bottom : null,
+        left: Number.isFinite(item?.left) ? item.left : null,
+        right: Number.isFinite(item?.right) ? item.right : null,
+      });
+    }
+    return out;
+  }
+
+  const richLines = Array.isArray(options?.ocrLines)
+    ? normalizeOcrRichLines(options.ocrLines)
+    : normalizeOcrLines(raw).map((text) => ({ text, side: null, top: null, bottom: null, left: null, right: null }));
+
+  const lines = richLines.map((x) => x.text);
   if (lines.length === 0) return '';
 
   const effectiveMode = mode === 'auto' ? detectChatApp({ raw, lines }) : mode;
+
+  const hasSideInfo = richLines.some((l) => l?.side === 'left' || l?.side === 'right');
+
+  function speakerFromSide(side) {
+    if (side === 'right') return 'Я';
+    if (side === 'left') return 'Собеседник';
+    return '';
+  }
+
+  function pickDominantSide(items) {
+    let left = 0;
+    let right = 0;
+    for (const x of items) {
+      if (x?.side === 'left') left += 1;
+      if (x?.side === 'right') right += 1;
+    }
+    if (left === 0 && right === 0) return null;
+    return right >= left ? 'right' : 'left';
+  }
 
   function countLetters(value) {
     return (String(value).match(/[\p{L}]/gu) ?? []).length;
@@ -483,11 +575,14 @@ function formatOcrDialogue(raw, mode = 'auto') {
     const low = v.toLowerCase();
     if (low.includes('http')) return false;
     if (countLetters(v) < 4) return false;
-    if (countDigits(v) > 1) return false;
+    if (countDigits(v) > 0) return false;
     if (lettersRatio(v) < 0.62) return false;
     const words = v.split(/\s+/).filter(Boolean);
     if (words.length > 4) return false;
     if (!/^[\p{Lu}]/u.test(v)) return false;
+    if (words.length >= 2) {
+      if (words.some((w) => !/^[\p{Lu}]/u.test(w))) return false;
+    }
     if (/[^\p{L}\p{M}\p{N} _.'’-]/u.test(v)) return false;
     return true;
   }
@@ -503,17 +598,334 @@ function formatOcrDialogue(raw, mode = 'auto') {
     return false;
   }
 
-  if (effectiveMode === 'whatsapp') {
+  function parseTimeFromDigits(value, lastTimeMinutes) {
+    const digits = String(value ?? '').replace(/\D/g, '');
+    if (digits.length !== 3 && digits.length !== 4) return null;
+
+    let h = 0;
+    let m = 0;
+    if (digits.length === 3) {
+      h = Number(digits.slice(0, 1));
+      m = Number(digits.slice(1));
+      if (lastTimeMinutes !== null) {
+        const lastH = Math.floor(lastTimeMinutes / 60);
+        if (lastH >= 10) return null;
+      }
+    } else {
+      h = Number(digits.slice(0, 2));
+      m = Number(digits.slice(2));
+    }
+    if (!Number.isInteger(h) || !Number.isInteger(m)) return null;
+    if (h < 0 || h > 23) return null;
+    if (m < 0 || m > 59) return null;
+    return { time: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`, minutes: h * 60 + m };
+  }
+
+  function extractTimeFromEnd(line, lastTimeMinutes) {
+    const v = String(line ?? '').trim();
+    if (!v) return null;
+
+    const m1 = v.match(/^(.*?)(\b\d{1,2})\s*[:.]\s*(\d{2})(?:[^\p{L}\p{N}]{0,6}|[^\p{L}\p{N}]{0,4}\p{L}[^\p{L}\p{N}]{0,2})$/u);
+    if (m1) {
+      const h = Number(m1[2]);
+      const mm = Number(m1[3]);
+      if (Number.isInteger(h) && Number.isInteger(mm) && h >= 0 && h <= 23 && mm >= 0 && mm <= 59) {
+        return {
+          time: `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`,
+          minutes: h * 60 + mm,
+          before: String(m1[1] ?? '').trim(),
+        };
+      }
+    }
+
+    const m2 = v.match(/^(.*?)(\b\d{3,4})(?:[^\p{L}\p{N}]{0,6}|[^\p{L}\p{N}]{0,4}\p{L}[^\p{L}\p{N}]{0,2})$/u);
+    if (m2) {
+      const parsed = parseTimeFromDigits(m2[2], lastTimeMinutes);
+      if (parsed) {
+        return { time: parsed.time, minutes: parsed.minutes, before: String(m2[1] ?? '').trim() };
+      }
+    }
+
+    return null;
+  }
+
+  function looksLikeHeaderNoise(value) {
+    const v = String(value ?? '').trim();
+    if (!v) return true;
+    if (/^\d{1,2}:\d{2}\b/u.test(v)) {
+      const symbols = String(v).replace(/[\p{L}\p{N}\s]/gu, '').length;
+      if (countLetters(v) < 10 && lettersRatio(v) < 0.42 && symbols >= 4) return true;
+    }
+    if (lettersRatio(v) < 0.15 && countLetters(v) < 4 && v.length <= 24) return true;
+    if (/^[›»«—|()\[\]{}'`-]+$/u.test(v)) return true;
+    return false;
+  }
+
+  function isProbablyNoiseLine(value) {
+    const v = String(value ?? '').trim();
+    if (!v) return true;
+    const low = v.toLowerCase();
+    const letters = countLetters(v);
+    const digits = countDigits(v);
+    if (letters === 0 && digits === 0) return true;
+    if (letters === 0 && digits <= 2 && v.length <= 4) return true;
+    if (letters < 3 && digits > 0 && v.length <= 5) return true;
+    if (letters < 4 && lettersRatio(v) < 0.25 && v.length <= 14) return true;
+    if ((low.includes('сообщен') || low.includes('ообщен') || low.includes('наберите') || low.includes('напишите')) && v.length <= 30) {
+      return true;
+    }
+    return false;
+  }
+
+  function cleanupMessageText(text, timeMinutes) {
+    const v0 = String(text ?? '')
+      .replace(/[|`]+/g, ' ')
+      .replace(/[\u200B\uFEFF]/g, '')
+      .replace(/[ \t\f\v\u00A0]+/g, ' ')
+      .replace(/\bMHe\b/g, 'Мне')
+      .replace(/\bH[уy]\b/gu, 'Ну')
+      .trim();
+    if (!v0) return '';
+
+    const overallLetters = countLetters(v0);
+    const overallDigits = countDigits(v0);
+    const overallRatio = lettersRatio(v0);
+    const latin = (v0.match(/[A-Za-z]/g) ?? []).length;
+    const cyr = (v0.match(/[\p{Script=Cyrillic}]/gu) ?? []).length;
+    const shouldPickTail =
+      (overallRatio < 0.52 && (overallDigits >= 6 || v0.length >= 90)) ||
+      (overallDigits >= 10 && v0.length >= 70) ||
+      (latin >= 6 && cyr >= 12 && v0.length >= 60) ||
+      /\b\p{L}{2,}\s+\d{1,2}:\s*\p{L}{2,}\b/iu.test(v0);
+
+    let baseCandidate = v0;
+    if (shouldPickTail) {
+      const low = v0.toLowerCase();
+      const starters = ['что', 'как', 'почему', 'когда', 'где', 'кто', 'ну', 'я', 'мы', 'ты', 'вы', 'он', 'она', 'они', 'да', 'нет'];
+      const re = new RegExp(`(?:^|\\s)(${starters.join('|')})\\s+`, 'giu');
+      let last = null;
+      for (const m of low.matchAll(re)) {
+        last = m;
+      }
+      if (last && typeof last.index === 'number') {
+        const start = last.index + (String(last[0]).startsWith(' ') ? 1 : 0);
+        const cut = String(v0).slice(start).trim();
+        if (cut.length >= 8 && lettersRatio(cut) >= 0.42) {
+          baseCandidate = cut;
+        }
+      }
+
+      const parts = v0
+        .split(/(?:\s[—-]\s|[|/]|\s{2,})/u)
+        .map((x) => String(x ?? '').trim())
+        .filter(Boolean);
+      for (let i = parts.length - 1; i >= 0 && parts.length - i <= 7; i -= 1) {
+        const p = parts[i];
+        const letters = countLetters(p);
+        if (letters >= 7 && lettersRatio(p) >= 0.48) {
+          baseCandidate = p;
+          break;
+        }
+        if (letters >= 5 && /[?!]/u.test(p)) {
+          baseCandidate = p;
+          break;
+        }
+      }
+    }
+
+    const base = baseCandidate
+      .replace(/^[›»«—\-\s]+/u, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    if (!base) return '';
+
+    const tokens = base.split(/\s+/u).filter(Boolean);
+    const totalLetters = countLetters(base);
+    const out = [];
+
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      const t = token
+        .replace(/^[“”"'()\[\]{}]+|[“”"'()\[\]{}]+$/gu, '')
+        .replace(/[.,;:]+$/gu, '');
+      if (!t) continue;
+      if (/^\d+\/\d*$/u.test(t)) continue;
+      if (/^\d+[\\/]+$/u.test(t)) continue;
+      if (/^\d+\)$/u.test(t)) continue;
+      if (/^[^\p{L}\p{N}]+$/u.test(t)) continue;
+
+      if (/^\d$/u.test(t) && totalLetters >= 18) continue;
+
+      if (/^\d{3}$/u.test(t) && totalLetters >= 18) {
+        const nextRaw = typeof tokens[i + 1] === 'string' ? tokens[i + 1] : '';
+        const next = String(nextRaw)
+          .replace(/^[“”"'()\[\]{}]+|[“”"'()\[\]{}]+$/gu, '')
+          .replace(/[.,;:]+$/gu, '')
+          .toLowerCase();
+        if (next !== 'руб' && next !== 'р' && next !== '₽') continue;
+      }
+
+      if (/^\d{3,4}$/u.test(t) && typeof timeMinutes === 'number') {
+        const parsed = parseTimeFromDigits(t, timeMinutes) ?? parseTimeFromDigits(t, null);
+        if (parsed && Math.abs(parsed.minutes - timeMinutes) <= 2) continue;
+      }
+
+      if (/^[A-Za-z]$/u.test(t) && totalLetters >= 18) continue;
+      if (/^[\p{L}]$/u.test(t) && totalLetters >= 18) continue;
+      if (/^[\p{Lu}]{2,4}$/u.test(t) && i <= 1 && tokens.length >= 4) continue;
+
+      out.push(t);
+    }
+
+    let cleaned = out.join(' ').replace(/\s{2,}/g, ' ').trim();
+    if (!cleaned) return '';
+
+    const dateLike = cleaned.match(/^(\d{1,2})\s+([\p{L}]{3,})(?:\s+(\d{4}))?\s+(\S[\s\S]*)$/u);
+    if (dateLike) {
+      const rest = String(dateLike[4] ?? '').trim();
+      const restLow = rest.toLowerCase();
+      const starters = ['что', 'как', 'почему', 'когда', 'где', 'кто', 'ну', 'я', 'мы', 'ты', 'вы', 'он', 'она', 'они', 'да', 'нет'];
+      const re = new RegExp(`(?:^|\\s)(${starters.join('|')})\\s+`, 'iu');
+      const m0 = restLow.match(re);
+      if (rest.length >= 10 && m0 && typeof m0.index === 'number') {
+        const start = m0.index + (String(m0[0]).startsWith(' ') ? 1 : 0);
+        const cut = rest.slice(start).trim();
+        if (cut.length >= 6) cleaned = cut;
+      }
+    }
+
+    const m = cleaned.match(/^(\p{Lu}[\p{L}\p{M}]|\p{Lu}[\p{L}\p{M}]{2,})\s+(\S[\s\S]*)$/u);
+    if (m) {
+      const first = String(m[1] ?? '').trim();
+      const rest = String(m[2] ?? '').trim();
+      const restLow = rest.toLowerCase();
+      const starters = ['что', 'как', 'почему', 'когда', 'где', 'кто', 'ну', 'я', 'мы', 'ты', 'вы', 'он', 'она', 'они', 'да', 'нет'];
+      if (first.length <= 5 && starters.some((s) => restLow.startsWith(s + ' ') || restLow === s || restLow.startsWith(s + '\u00A0'))) {
+        cleaned = rest;
+      }
+    }
+
+    return cleaned
+      .replace(/\s+([?!.,:;])/g, '$1')
+      .replace(/([?!]){2,}/g, '$1')
+      .replace(/\.{3,}/g, '..')
+      .trim();
+  }
+
+  const endTimeLikeCount = lines.filter((l) => extractTimeFromEnd(l, null)).length;
+  const shouldUseEndTimeParser = endTimeLikeCount >= 2;
+
+  if (shouldUseEndTimeParser) {
+    if (hasSideInfo && richLines.some((l) => typeof l?.top === 'number' && typeof l?.bottom === 'number')) {
+      const formatted = [];
+      let lastTimeMinutes = null;
+
+      const heights = richLines
+        .map((l) => (typeof l?.top === 'number' && typeof l?.bottom === 'number' ? Math.max(1, l.bottom - l.top) : null))
+        .filter((x) => typeof x === 'number');
+      heights.sort((a, b) => a - b);
+      const medianHeight = heights.length > 0 ? heights[Math.floor(heights.length / 2)] : 18;
+      const gapThreshold = Math.max(18, Math.min(34, Math.round(medianHeight * 1.15)));
+
+      const firstTimeIndex = richLines.findIndex((l) => Boolean(extractTimeFromEnd(l?.text ?? '', null)));
+      const startIndex = firstTimeIndex >= 0 ? firstTimeIndex : 0;
+
+      const bubbles = [];
+      let current = null;
+
+      function endsWithTimeToken(text) {
+        const v = String(text ?? '').trim();
+        if (!v) return false;
+        return Boolean(extractTimeFromEnd(v, null));
+      }
+
+      for (let i = startIndex; i < richLines.length; i += 1) {
+        const item = richLines[i];
+        const line = item?.text ?? '';
+        if (!line) continue;
+        if (isDaySeparator(line)) continue;
+        if (looksLikeHeaderNoise(line)) continue;
+        if (isProbablyNoiseLine(line)) continue;
+
+        const top = typeof item.top === 'number' ? item.top : null;
+        const bottom = typeof item.bottom === 'number' ? item.bottom : null;
+        const side = item.side;
+
+        const lineEndsWithTime = endsWithTimeToken(line);
+
+        const canJoin =
+          current &&
+          current.side &&
+          side &&
+          current.side === side &&
+          current.endsWithTime !== true &&
+          typeof top === 'number' &&
+          typeof current.bottom === 'number' &&
+          top - current.bottom <= gapThreshold;
+
+        if (!current || !canJoin) {
+          if (current) bubbles.push(current);
+          current = { side, top, bottom, lines: [item], endsWithTime: lineEndsWithTime };
+        } else {
+          current.lines.push(item);
+          if (typeof bottom === 'number') current.bottom = typeof current.bottom === 'number' ? Math.max(current.bottom, bottom) : bottom;
+          current.endsWithTime = lineEndsWithTime;
+        }
+      }
+      if (current) bubbles.push(current);
+
+      for (const bubble of bubbles) {
+        const joined = Array.isArray(bubble?.lines)
+          ? bubble.lines
+              .map((x) => String(x?.text ?? '').trim())
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s{2,}/g, ' ')
+              .trim()
+          : '';
+        if (!joined) continue;
+
+        const extracted = extractTimeFromEnd(joined, lastTimeMinutes);
+        if (!extracted && lastTimeMinutes === null) continue;
+        const time = extracted?.time ? String(extracted.time) : lastTimeMinutes !== null ? `${String(Math.floor(lastTimeMinutes / 60)).padStart(2, '0')}:${String(lastTimeMinutes % 60).padStart(2, '0')}` : '??:??';
+        if (typeof extracted?.minutes === 'number') lastTimeMinutes = extracted.minutes;
+
+        const before = extracted?.before ? String(extracted.before).trim() : joined;
+        const inline = before.match(/^([^:]{1,60}):\s*(.+)$/u);
+        let name = '';
+        let msg = before;
+        if (inline && looksLikeName(inline[1])) {
+          name = String(inline[1]).trim();
+          msg = String(inline[2]).trim();
+        }
+
+        const sidePicked = bubble?.side || pickDominantSide(bubble?.lines);
+        if (!name) name = speakerFromSide(sidePicked) || 'Собеседник';
+
+        const cleanedMessage = cleanupMessageText(msg, lastTimeMinutes);
+        if (!cleanedMessage) continue;
+        formatted.push(`${time} - ${name}: ${cleanedMessage}`);
+      }
+
+      return formatted.join('\n').trim();
+    }
+
     const formatted = [];
     let buffer = [];
     let lastPossibleName = '';
+    let lastTimeMinutes = null;
 
-    for (const line of lines) {
+    const firstTimeIndex = lines.findIndex((l) => Boolean(extractTimeFromEnd(l, null)));
+    const startIndex = firstTimeIndex >= 0 ? firstTimeIndex : 0;
+
+    for (let i = startIndex; i < lines.length; i += 1) {
+      const line = lines[i];
       if (isDaySeparator(line)) continue;
+      if (looksLikeHeaderNoise(line)) continue;
 
-      const m = String(line).match(/^(.*?)(\b\d{1,2}:\d{2})$/u);
-      if (!m) {
-        if (looksLikeName(line)) {
+      const extracted = extractTimeFromEnd(line, lastTimeMinutes);
+      if (!extracted) {
+        if (!hasSideInfo && looksLikeName(line)) {
           lastPossibleName = line;
           continue;
         }
@@ -521,19 +933,28 @@ function formatOcrDialogue(raw, mode = 'auto') {
         continue;
       }
 
-      const before = String(m[1] ?? '').trim();
-      const time = String(m[2] ?? '').trim();
-      const collected = buffer.concat(before).map((x) => String(x).trim()).filter(Boolean);
+      const before = String(extracted.before ?? '').trim();
+      const time = String(extracted.time ?? '').trim();
+      lastTimeMinutes = typeof extracted.minutes === 'number' ? extracted.minutes : lastTimeMinutes;
+
+      const collected = buffer
+        .concat(before)
+        .map((x) => String(x).trim())
+        .filter(Boolean)
+        .filter((x) => !isProbablyNoiseLine(x));
       buffer = [];
 
       if (!time) continue;
-      if (collected.length === 0) continue;
+      if (collected.length === 0) {
+        lastPossibleName = '';
+        continue;
+      }
 
       let name = '';
       let message = '';
 
       const first = collected[0] ?? '';
-      const inline = first.match(/^([^:]{2,40}):\s*(.+)$/);
+      const inline = first.match(/^([^:]{1,60}):\s*(.+)$/);
       if (inline && looksLikeName(inline[1])) {
         name = String(inline[1]).trim();
         const rest = [String(inline[2]).trim()].concat(collected.slice(1));
@@ -545,8 +966,71 @@ function formatOcrDialogue(raw, mode = 'auto') {
       }
 
       lastPossibleName = '';
-      if (!message) continue;
-      formatted.push(`${time} - ${name || 'Собеседник'}: ${message}`);
+      const cleanedMessage = cleanupMessageText(message, lastTimeMinutes);
+      if (!cleanedMessage) continue;
+      formatted.push(`${time} - ${name || 'Собеседник'}: ${cleanedMessage}`);
+    }
+
+    return formatted.join('\n').trim();
+  }
+
+  if (effectiveMode === 'whatsapp') {
+    const formatted = [];
+    let buffer = [];
+    let lastPossibleName = '';
+
+    for (let i = 0; i < richLines.length; i += 1) {
+      const item = richLines[i];
+      const line = item?.text ?? '';
+      if (!line) continue;
+      if (isDaySeparator(line)) continue;
+
+      const m = String(line).match(/^(.*?)(\b\d{1,2}:\d{2})$/u);
+      if (!m) {
+        if (!hasSideInfo && looksLikeName(line)) {
+          lastPossibleName = line;
+          continue;
+        }
+        buffer.push(item);
+        continue;
+      }
+
+      const before = String(m[1] ?? '').trim();
+      const time = String(m[2] ?? '').trim();
+      const collected = buffer
+        .concat([{ text: before, side: item?.side ?? null }])
+        .map((x) => ({ text: String(x?.text ?? x ?? '').trim(), side: x?.side ?? null }))
+        .filter((x) => Boolean(x.text));
+      buffer = [];
+
+      if (!time) continue;
+      if (collected.length === 0) continue;
+
+      let name = '';
+      let message = '';
+
+      const first = collected[0]?.text ?? '';
+      const inline = String(first).match(/^([^:]{2,40}):\s*(.+)$/);
+      if (inline && looksLikeName(inline[1])) {
+        name = String(inline[1]).trim();
+        const rest = [String(inline[2]).trim()].concat(collected.slice(1).map((x) => x.text));
+        message = rest.join(' ').replace(/\s{2,}/g, ' ').trim();
+      } else {
+        const candidateName = lastPossibleName && looksLikeName(lastPossibleName) ? lastPossibleName : '';
+        name = candidateName;
+        message = collected.map((x) => x.text).join(' ').replace(/\s{2,}/g, ' ').trim();
+      }
+
+      lastPossibleName = '';
+      const t = String(time).replace(/\D/g, '');
+      const h = Number(t.slice(0, 2));
+      const mm = Number(t.slice(2));
+      const minutes = Number.isInteger(h) && Number.isInteger(mm) ? h * 60 + mm : null;
+      const cleanedMessage = cleanupMessageText(message, typeof minutes === 'number' ? minutes : null);
+      if (!cleanedMessage) continue;
+      const sidePicked = item?.side || pickDominantSide(collected);
+      const fallbackName = hasSideInfo ? speakerFromSide(sidePicked) : '';
+      formatted.push(`${time} - ${name || fallbackName || 'Собеседник'}: ${cleanedMessage}`);
     }
 
     return formatted.join('\n').trim();
@@ -555,7 +1039,10 @@ function formatOcrDialogue(raw, mode = 'auto') {
   const blocks = [];
   let current = null;
 
-  for (const line of lines) {
+  for (let i = 0; i < richLines.length; i += 1) {
+    const item = richLines[i];
+    const line = item?.text ?? '';
+    if (!line) continue;
     const m = String(line).match(/^(\d{1,2}:\d{2})\b\s*(.*)$/);
     if (m) {
       if (current) blocks.push(current);
@@ -565,11 +1052,11 @@ function formatOcrDialogue(raw, mode = 'auto') {
       const digits = (restRaw.match(/[\p{N}]/gu) ?? []).length;
       const keepRest = letters >= 4 || (letters >= 3 && digits >= 2);
       const rest = keepRest ? restRaw : '';
-      current = { time, lines: rest ? [rest] : [] };
+      current = { time, items: rest ? [{ text: rest, side: item?.side ?? null }] : [] };
       continue;
     }
     if (!current) continue;
-    current.lines.push(String(line).trim());
+    current.items.push({ text: String(line).trim(), side: item?.side ?? null });
   }
   if (current) blocks.push(current);
 
@@ -577,30 +1064,41 @@ function formatOcrDialogue(raw, mode = 'auto') {
   for (const block of blocks) {
     const time = String(block.time ?? '').trim();
     if (!time) continue;
-    const rawLines = Array.isArray(block.lines) ? block.lines.map((l) => String(l ?? '').trim()).filter(Boolean) : [];
+    const rawLines = Array.isArray(block.items)
+      ? block.items
+          .map((l) => ({ text: String(l?.text ?? '').trim(), side: l?.side ?? null }))
+          .filter((x) => Boolean(x.text))
+      : [];
     if (rawLines.length === 0) continue;
 
     let name = '';
     const msgLines = [];
-    const first = rawLines[0] ?? '';
-    const inline = first.match(/^([^:]{2,40}):\s*(.+)$/);
+    const first = rawLines[0]?.text ?? '';
+    const inline = String(first).match(/^([^:]{2,40}):\s*(.+)$/);
     if (inline && looksLikeName(inline[1])) {
       name = String(inline[1]).trim();
       msgLines.push(String(inline[2]).trim());
-      msgLines.push(...rawLines.slice(1));
-    } else if (looksLikeName(first) && rawLines.length >= 2) {
+      msgLines.push(...rawLines.slice(1).map((x) => x.text));
+    } else if (!hasSideInfo && looksLikeName(first) && rawLines.length >= 2) {
       name = first;
-      msgLines.push(...rawLines.slice(1));
+      msgLines.push(...rawLines.slice(1).map((x) => x.text));
     } else {
-      msgLines.push(...rawLines);
+      msgLines.push(...rawLines.map((x) => x.text));
     }
 
     const message = msgLines
       .join(' ')
       .replace(/\s{2,}/g, ' ')
       .trim();
-    if (!message) continue;
-    formatted.push(`${time} - ${name || 'Собеседник'}: ${message}`);
+    const t = String(time).replace(/\D/g, '');
+    const h = Number(t.slice(0, 2));
+    const mm = Number(t.slice(2));
+    const minutes = Number.isInteger(h) && Number.isInteger(mm) ? h * 60 + mm : null;
+    const cleanedMessage = cleanupMessageText(message, typeof minutes === 'number' ? minutes : null);
+    if (!cleanedMessage) continue;
+    const sidePicked = pickDominantSide(rawLines);
+    const fallbackName = hasSideInfo ? speakerFromSide(sidePicked) : '';
+    formatted.push(`${time} - ${name || fallbackName || 'Собеседник'}: ${cleanedMessage}`);
   }
 
   return formatted.join('\n').trim();
@@ -1499,6 +1997,143 @@ async function runTesseractOcr({ buffer }) {
   }
 }
 
+async function runTesseractOcrTsv({ buffer }) {
+  const lang = (typeof process.env.OCR_LANG === 'string' ? process.env.OCR_LANG.trim() : '') || 'rus+eng';
+  const psm = getEnvInt('OCR_PSM') ?? 6;
+  const timeoutMs = getEnvInt('OCR_TIMEOUT_MS') ?? 20000;
+
+  const tmpBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'rfs-ocr-'));
+  const inputPath = path.join(tmpBase, 'input.png');
+  try {
+    await fs.promises.writeFile(inputPath, buffer);
+    const { stdout } = await execFileAsync(
+      'tesseract',
+      [inputPath, 'stdout', '-l', lang, '--psm', String(psm), '-c', 'preserve_interword_spaces=1', 'tsv'],
+      {
+        timeout: Math.max(3000, Math.min(90000, timeoutMs)),
+        maxBuffer: 18 * 1024 * 1024,
+      },
+    );
+    return String(stdout ?? '');
+  } finally {
+    try {
+      await fs.promises.rm(tmpBase, { recursive: true, force: true });
+    } catch {
+      return;
+    }
+  }
+}
+
+function parseTesseractTsvToRichLines(tsv) {
+  const rows = String(tsv ?? '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter(Boolean);
+  if (rows.length < 2) return null;
+
+  const header = rows[0].split('\t');
+  const idx = new Map();
+  for (let i = 0; i < header.length; i += 1) idx.set(header[i], i);
+  const required = ['page_num', 'block_num', 'par_num', 'line_num', 'word_num', 'left', 'top', 'width', 'height', 'conf', 'text'];
+  if (!required.every((k) => idx.has(k))) return null;
+
+  function get(row, name) {
+    const i = idx.get(name);
+    if (typeof i !== 'number') return '';
+    return row[i] ?? '';
+  }
+
+  const groups = new Map();
+  let pageMaxRight = 0;
+
+  for (let r = 1; r < rows.length; r += 1) {
+    const cols = rows[r].split('\t');
+    if (cols.length < header.length) continue;
+
+    const text = String(get(cols, 'text') ?? '').trim();
+    if (!text) continue;
+
+    const left = Number(get(cols, 'left'));
+    const top = Number(get(cols, 'top'));
+    const width = Number(get(cols, 'width'));
+    const height = Number(get(cols, 'height'));
+    if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(width) || !Number.isFinite(height)) continue;
+
+    const right = left + width;
+    const bottom = top + height;
+    if (right > pageMaxRight) pageMaxRight = right;
+
+    const key = [get(cols, 'page_num'), get(cols, 'block_num'), get(cols, 'par_num'), get(cols, 'line_num')].join(':');
+    const existing = groups.get(key);
+    const word = {
+      text,
+      left,
+      top,
+      right,
+      bottom,
+      conf: Number(get(cols, 'conf')),
+      wordNum: Number(get(cols, 'word_num')),
+    };
+    if (!existing) {
+      groups.set(key, { words: [word] });
+    } else {
+      existing.words.push(word);
+    }
+  }
+
+  if (!Number.isFinite(pageMaxRight) || pageMaxRight <= 0) return null;
+
+  const out = [];
+  for (const group of groups.values()) {
+    const words = Array.isArray(group?.words) ? group.words : [];
+    if (words.length === 0) continue;
+    words.sort((a, b) => {
+      if (Number.isFinite(a.wordNum) && Number.isFinite(b.wordNum) && a.wordNum !== b.wordNum) return a.wordNum - b.wordNum;
+      if (a.left !== b.left) return a.left - b.left;
+      return a.top - b.top;
+    });
+
+    let leftMin = Infinity;
+    let rightMax = -Infinity;
+    let topMin = Infinity;
+    let bottomMax = -Infinity;
+    const parts = [];
+    for (const w of words) {
+      leftMin = Math.min(leftMin, w.left);
+      rightMax = Math.max(rightMax, w.right);
+      topMin = Math.min(topMin, w.top);
+      bottomMax = Math.max(bottomMax, w.bottom);
+      parts.push(String(w.text));
+    }
+    const text = parts.join(' ').replace(/\s{2,}/g, ' ').trim();
+    if (!text) continue;
+
+    const lineWidth = Math.max(0, rightMax - leftMin);
+    const mid = (leftMin + rightMax) / 2;
+    const wideRatio = pageMaxRight > 0 ? lineWidth / pageMaxRight : 0;
+    const marginLeft = pageMaxRight > 0 ? leftMin / pageMaxRight : 0;
+    const marginRight = pageMaxRight > 0 ? (pageMaxRight - rightMax) / pageMaxRight : 0;
+    let side = null;
+    if (wideRatio < 0.82) {
+      if (mid >= pageMaxRight * 0.58) side = 'right';
+      else if (mid <= pageMaxRight * 0.42) side = 'left';
+    } else {
+      if (marginRight <= 0.08 && marginLeft >= 0.18) side = 'right';
+      else if (marginLeft <= 0.08 && marginRight >= 0.18) side = 'left';
+    }
+
+    out.push({ text, left: leftMin, right: rightMax, top: topMin, bottom: bottomMax, side });
+  }
+
+  out.sort((a, b) => {
+    if (a.top !== b.top) return a.top - b.top;
+    return a.left - b.left;
+  });
+
+  return out;
+}
+
 app.post(
   '/api/ocr',
   ocrLimiter,
@@ -1519,8 +2154,16 @@ app.post(
     }
 
     try {
-      const raw = await runTesseractOcr({ buffer: body });
-      const formatted = formatOcrDialogue(raw);
+      let richLines = null;
+      try {
+        const tsv = await runTesseractOcrTsv({ buffer: body });
+        richLines = parseTesseractTsvToRichLines(tsv);
+      } catch {
+        richLines = null;
+      }
+
+      const raw = Array.isArray(richLines) && richLines.length > 0 ? richLines.map((x) => x.text).join('\n') : await runTesseractOcr({ buffer: body });
+      const formatted = Array.isArray(richLines) && richLines.length > 0 ? formatOcrDialogue(raw, 'auto', { ocrLines: richLines }) : formatOcrDialogue(raw);
       const text = sanitizeTextForUi(formatted || raw);
       res.status(200).json({ text });
     } catch {

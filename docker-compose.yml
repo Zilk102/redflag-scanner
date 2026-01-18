@@ -46,6 +46,8 @@ services:
       TELEGRAM_AUTH_MAX_AGE_SECONDS: ${TELEGRAM_AUTH_MAX_AGE_SECONDS:-}
     expose:
       - "5000"
+    ports:
+      - "5000:5000"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:5000/api/health"]
       interval: 10s
@@ -62,7 +64,6 @@ services:
       - server
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - ${NGINX_CONF_PATH:-./nginx/nginx.conf}:/etc/nginx/nginx.conf:ro
       - ${CLIENT_DIST_PATH:-./client/dist}:/usr/share/nginx/html:ro
