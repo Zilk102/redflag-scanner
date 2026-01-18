@@ -548,6 +548,117 @@ function normalizeEmail(value) {
   return v;
 }
 
+function getTelegramBotToken() {
+  const token = typeof process.env.TELEGRAM_BOT_TOKEN === 'string' ? process.env.TELEGRAM_BOT_TOKEN.trim() : '';
+  if (!token) {
+    const err = new Error('TELEGRAM_BOT_TOKEN не задан');
+    err.statusCode = 500;
+    throw err;
+  }
+  return token;
+}
+
+function getTelegramAuthMaxAgeSeconds() {
+  const raw = typeof process.env.TELEGRAM_AUTH_MAX_AGE_SECONDS === 'string' ? process.env.TELEGRAM_AUTH_MAX_AGE_SECONDS.trim() : '';
+  if (!raw) return 300;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 30 || n > 86400) {
+    const err = new Error('TELEGRAM_AUTH_MAX_AGE_SECONDS должен быть числом от 30 до 86400');
+    err.statusCode = 500;
+    throw err;
+  }
+  return Math.trunc(n);
+}
+
+function timingSafeEqualHex(a, b) {
+  const ax = typeof a === 'string' ? a.trim().toLowerCase() : '';
+  const bx = typeof b === 'string' ? b.trim().toLowerCase() : '';
+  if (!ax || !bx) return false;
+  if (!/^[0-9a-f]+$/.test(ax) || !/^[0-9a-f]+$/.test(bx)) return false;
+  if (ax.length !== bx.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(ax, 'hex'), Buffer.from(bx, 'hex'));
+  } catch {
+    return false;
+  }
+}
+
+function verifyTelegramLoginPayload(query) {
+  const q = query && typeof query === 'object' ? query : {};
+  const fields = {};
+  for (const [k, v] of Object.entries(q)) {
+    if (typeof v === 'string') fields[k] = v;
+    else if (Array.isArray(v) && typeof v[0] === 'string') fields[k] = v[0];
+  }
+
+  const hash = typeof fields.hash === 'string' ? fields.hash : '';
+  const id = typeof fields.id === 'string' ? fields.id : '';
+  const authDateRaw = typeof fields.auth_date === 'string' ? fields.auth_date : '';
+  const authDate = Number(authDateRaw);
+  if (!hash || !id || !Number.isFinite(authDate)) {
+    const err = new Error('Telegram: некорректные данные авторизации');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const maxAge = getTelegramAuthMaxAgeSeconds();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (authDate < nowSeconds - maxAge || authDate > nowSeconds + 60) {
+    const err = new Error('Telegram: данные авторизации устарели');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const pairs = Object.entries(fields)
+    .filter(([k]) => k !== 'hash')
+    .map(([k, v]) => [k, String(v)])
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+
+  const dataCheckString = pairs.map(([k, v]) => `${k}=${v}`).join('\n');
+  const botToken = getTelegramBotToken();
+  const secretKey = crypto.createHash('sha256').update(botToken, 'utf8').digest();
+  const computed = crypto.createHmac('sha256', secretKey).update(dataCheckString, 'utf8').digest('hex');
+  if (!timingSafeEqualHex(computed, hash)) {
+    const err = new Error('Telegram: подпись не совпадает');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const telegramId = String(id).trim();
+  if (!telegramId) {
+    const err = new Error('Telegram: не удалось определить пользователя');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const username = typeof fields.username === 'string' ? fields.username.trim() : '';
+  const firstName = typeof fields.first_name === 'string' ? fields.first_name.trim() : '';
+  const lastName = typeof fields.last_name === 'string' ? fields.last_name.trim() : '';
+  const photoUrl = typeof fields.photo_url === 'string' ? fields.photo_url.trim() : '';
+
+  return {
+    telegramId,
+    telegramUsername: username || null,
+    telegramFirstName: firstName || null,
+    telegramLastName: lastName || null,
+    telegramPhotoUrl: photoUrl || null,
+  };
+}
+
+function buildUserLabel(user) {
+  const username = typeof user.telegramUsername === 'string' ? user.telegramUsername.trim() : '';
+  if (username) return `@${username}`;
+  const firstName = typeof user.telegramFirstName === 'string' ? user.telegramFirstName.trim() : '';
+  const lastName = typeof user.telegramLastName === 'string' ? user.telegramLastName.trim() : '';
+  const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+  if (fullName) return fullName;
+  const email = typeof user.email === 'string' ? user.email.trim() : '';
+  if (email) return email;
+  const tid = typeof user.telegramId === 'string' ? user.telegramId.trim() : '';
+  if (tid) return `tg:${tid}`;
+  return 'пользователь';
+}
+
 async function getAuthContext(req) {
   const cookies = parseCookieHeader(req.headers.cookie);
   const sid = typeof cookies.sid === 'string' ? cookies.sid : '';
@@ -941,7 +1052,7 @@ app.get('/api/auth/me', authLimiter, async (req, res, next) => {
       res.json({ user: null });
       return;
     }
-    res.json({ user: { id: ctx.user.id, email: ctx.user.email } });
+    res.json({ user: { id: ctx.user.id, label: buildUserLabel(ctx.user) } });
   } catch (err) {
     next(err);
   }
@@ -969,34 +1080,9 @@ app.get('/api/auth/csrf', authLimiter, async (req, res, next) => {
 
 app.post('/api/auth/register', authLimiter, requireCsrf(async (req, res, next) => {
   try {
-    const email = normalizeEmail(req.body?.email);
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
-    if (!email) {
-      const err = new Error('Некорректный email');
-      err.statusCode = 400;
-      throw err;
-    }
-    if (typeof password !== 'string' || password.length < 8 || password.length > 200) {
-      const err = new Error('Пароль должен быть длиной от 8 до 200 символов');
-      err.statusCode = 400;
-      throw err;
-    }
-
-    const prisma = getPrismaClient();
-    const exists = await prisma.user.findUnique({ where: { email } });
-    if (exists) {
-      const err = new Error('Пользователь уже существует');
-      err.statusCode = 409;
-      throw err;
-    }
-
-    const passwordHash = createPasswordHash(password);
-    const user = await prisma.user.create({ data: { email, passwordHash } });
-    const { token } = await createSessionForUser({ req, user });
-    setSidCookie(req, res, token, getSessionTtlSeconds());
-    const csrfToken = makeCsrfToken();
-    setCsrfCookie(req, res, csrfToken, getCsrfTtlSeconds());
-    res.json({ user: { id: user.id, email: user.email }, csrfToken });
+    const err = new Error('Регистрация через email отключена. Используй вход через Telegram.');
+    err.statusCode = 410;
+    throw err;
   } catch (err) {
     next(err);
   }
@@ -1004,37 +1090,49 @@ app.post('/api/auth/register', authLimiter, requireCsrf(async (req, res, next) =
 
 app.post('/api/auth/login', authLimiter, requireCsrf(async (req, res, next) => {
   try {
-    const email = normalizeEmail(req.body?.email);
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
-    if (!email) {
-      const err = new Error('Некорректный email');
-      err.statusCode = 400;
-      throw err;
-    }
-    if (typeof password !== 'string' || password.length < 1 || password.length > 200) {
-      const err = new Error('Некорректный пароль');
-      err.statusCode = 400;
-      throw err;
-    }
+    const err = new Error('Вход через email отключен. Используй вход через Telegram.');
+    err.statusCode = 410;
+    throw err;
+  } catch (err) {
+    next(err);
+  }
+}));
 
+app.get('/api/auth/telegram/callback', authLimiter, async (req, res, next) => {
+  try {
+    const payload = verifyTelegramLoginPayload(req.query);
     const prisma = getPrismaClient();
-    const user = await prisma.user.findUnique({ where: { email } });
-    const ok = user ? verifyPassword(password, user.passwordHash) : verifyPassword(password, createPasswordHash('dummy_password_123'));
-    if (!user || !ok) {
-      const err = new Error('Неверный email или пароль');
-      err.statusCode = 401;
-      throw err;
-    }
+    const existing = await prisma.user.findUnique({ where: { telegramId: payload.telegramId } });
+    const user = existing
+      ? await prisma.user.update({
+          where: { id: existing.id },
+          data: {
+            telegramId: payload.telegramId,
+            telegramUsername: payload.telegramUsername,
+            telegramFirstName: payload.telegramFirstName,
+            telegramLastName: payload.telegramLastName,
+            telegramPhotoUrl: payload.telegramPhotoUrl,
+          },
+        })
+      : await prisma.user.create({
+          data: {
+            telegramId: payload.telegramId,
+            telegramUsername: payload.telegramUsername,
+            telegramFirstName: payload.telegramFirstName,
+            telegramLastName: payload.telegramLastName,
+            telegramPhotoUrl: payload.telegramPhotoUrl,
+          },
+        });
 
     const { token } = await createSessionForUser({ req, user });
     setSidCookie(req, res, token, getSessionTtlSeconds());
     const csrfToken = makeCsrfToken();
     setCsrfCookie(req, res, csrfToken, getCsrfTtlSeconds());
-    res.json({ user: { id: user.id, email: user.email }, csrfToken });
+    res.status(302).setHeader('Location', '/').end();
   } catch (err) {
     next(err);
   }
-}));
+});
 
 app.post('/api/auth/logout', authLimiter, requireCsrf(async (req, res, next) => {
   try {

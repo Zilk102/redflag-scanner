@@ -21,7 +21,7 @@ type ScanResponse = {
 
 type AuthUser = {
   id: string;
-  email: string;
+  label: string;
 };
 
 type CsrfResponse = {
@@ -768,9 +768,6 @@ export default function App() {
   const [anonymizeEnabled, setAnonymizeEnabled] = useState(true);
   const [retentionPreset, setRetentionPreset] = useState<'default' | '24h' | '7d' | 'off'>('default');
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
-  const [authEmail, setAuthEmail] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
   const [isAuthBusy, setIsAuthBusy] = useState(false);
   const [authPanelOpen, setAuthPanelOpen] = useState(false);
   const [loadingLabelIndex, setLoadingLabelIndex] = useState(0);
@@ -789,6 +786,13 @@ export default function App() {
 
   const csrfTokenRef = useRef('');
   const csrfInFlightRef = useRef<Promise<string> | null>(null);
+  const telegramLoginRef = useRef<HTMLDivElement | null>(null);
+
+  const telegramBotUsername =
+    (import.meta.env as { VITE_TELEGRAM_BOT_USERNAME?: string }).VITE_TELEGRAM_BOT_USERNAME?.trim() ?? '';
+  const telegramAuthUrl = useMemo(() => {
+    return new URL('/api/auth/telegram/callback', window.location.origin).toString();
+  }, []);
 
   const ai = useMemo(() => parseAiVerdict(scanResult?.result), [scanResult]);
   const loadingLabels = useMemo(
@@ -923,7 +927,7 @@ export default function App() {
         const response = await axios.get<{ user: AuthUser | null }>('/api/auth/me');
         if (cancelled) return;
         const u = response.data?.user;
-        setAuthUser(u && typeof u.id === 'string' && typeof u.email === 'string' ? u : null);
+        setAuthUser(u && typeof u.id === 'string' && typeof u.label === 'string' ? u : null);
       } catch {
         if (cancelled) return;
         setAuthUser(null);
@@ -934,6 +938,32 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (authUser) setAuthPanelOpen(false);
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authPanelOpen) return;
+    if (authUser) return;
+    if (!telegramBotUsername) return;
+    const host = telegramLoginRef.current;
+    if (!host) return;
+
+    host.innerHTML = '';
+    const script = document.createElement('script');
+    script.async = true;
+    script.src = 'https://telegram.org/js/telegram-widget.js?22';
+    script.setAttribute('data-telegram-login', telegramBotUsername);
+    script.setAttribute('data-size', 'large');
+    script.setAttribute('data-auth-url', telegramAuthUrl);
+    script.setAttribute('data-request-access', 'write');
+    host.appendChild(script);
+
+    return () => {
+      host.innerHTML = '';
+    };
+  }, [authPanelOpen, authUser, telegramAuthUrl, telegramBotUsername]);
 
   useEffect(() => {
     void ensureCsrfToken();
@@ -975,48 +1005,6 @@ export default function App() {
       current?.terminate?.();
     };
   }, []);
-
-  const handleAuthSubmit = useCallback(async () => {
-    if (isAuthBusy) return;
-    const email = authEmail.trim();
-    const password = authPassword;
-    if (!email || !password) {
-      showToast({
-        id: crypto.randomUUID(),
-        tone: 'danger',
-        title: 'Заполни email и пароль',
-      });
-      return;
-    }
-
-    try {
-      setIsAuthBusy(true);
-      await ensureCsrfToken();
-      const url = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
-      const response = await axios.post<{ user: AuthUser; csrfToken?: string }>(url, { email, password });
-      const u = response.data?.user;
-      if (!u || typeof u.id !== 'string' || typeof u.email !== 'string') throw new Error('bad_user');
-      const nextCsrf = typeof response.data?.csrfToken === 'string' ? response.data.csrfToken : '';
-      if (nextCsrf) applyCsrfToken(nextCsrf);
-      setAuthUser(u);
-      setAuthPassword('');
-      setAuthPanelOpen(false);
-      showToast({
-        id: crypto.randomUUID(),
-        tone: 'success',
-        title: authMode === 'register' ? 'Аккаунт создан' : 'Ты вошёл(а)',
-      });
-    } catch {
-      showToast({
-        id: crypto.randomUUID(),
-        tone: 'danger',
-        title: 'Не удалось войти',
-        message: 'Проверь email/пароль и попробуй ещё раз.',
-      });
-    } finally {
-      setIsAuthBusy(false);
-    }
-  }, [applyCsrfToken, authEmail, authMode, authPassword, ensureCsrfToken, isAuthBusy, showToast]);
 
   const handleLogout = useCallback(async () => {
     if (isAuthBusy) return;
@@ -1227,9 +1215,8 @@ export default function App() {
         id: crypto.randomUUID(),
         tone: 'danger',
         title: 'Нужна авторизация',
-        message: 'Войди, чтобы оплатить и открыть полный отчёт.',
+        message: 'Войди через Telegram, чтобы оплатить и открыть полный отчёт.',
       });
-      setAuthMode('login');
       setAuthPanelOpen(true);
       return;
     }
@@ -1432,9 +1419,8 @@ export default function App() {
         id: crypto.randomUUID(),
         tone: 'danger',
         title: 'Нужна авторизация',
-        message: 'Войди, чтобы задавать вопросы по отчёту.',
+        message: 'Войди через Telegram, чтобы задавать вопросы по отчёту.',
       });
-      setAuthMode('login');
       setAuthPanelOpen(true);
       return;
     }
@@ -1469,9 +1455,8 @@ export default function App() {
         id: crypto.randomUUID(),
         tone: 'danger',
         title: 'Нужна авторизация',
-        message: 'Войди, чтобы удалять свои отчёты.',
+        message: 'Войди через Telegram, чтобы удалять свои отчёты.',
       });
-      setAuthMode('login');
       setAuthPanelOpen(true);
       setDeleteConfirmOpen(false);
       return;
@@ -1594,7 +1579,7 @@ export default function App() {
               {authUser ? (
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3">
                   <div className="text-sm font-semibold text-white/85">
-                    Вошёл(а) как <span className="font-black text-white">{authUser.email}</span>
+                    Вошёл(а) как <span className="font-black text-white">{authUser.label}</span>
                   </div>
                   <button
                     type="button"
@@ -1611,73 +1596,29 @@ export default function App() {
                 <div className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="text-sm font-semibold text-white/85">
-                      Хочешь сохранять отчёты и открывать полный разбор? Войди.
+                      Хочешь сохранять отчёты и открывать полный разбор? Войди через Telegram.
                     </div>
                     <button
                       type="button"
                       onClick={() => setAuthPanelOpen((v) => !v)}
                       className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-xs font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
                     >
-                      {authPanelOpen ? 'Скрыть' : 'Войти / Регистрация'}
+                      {authPanelOpen ? 'Скрыть' : 'Войти через Telegram'}
                     </button>
                   </div>
 
                   {authPanelOpen ? (
                     <div className="grid gap-3">
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setAuthMode('login')}
-                          className={[
-                            'rounded-xl px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition',
-                            authMode === 'login'
-                              ? 'bg-white/10 text-white'
-                              : 'bg-transparent text-white/60 hover:bg-white/5',
-                          ].join(' ')}
-                        >
-                          Вход
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setAuthMode('register')}
-                          className={[
-                            'rounded-xl px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition',
-                            authMode === 'register'
-                              ? 'bg-white/10 text-white'
-                              : 'bg-transparent text-white/60 hover:bg-white/5',
-                          ].join(' ')}
-                        >
-                          Регистрация
-                        </button>
-                      </div>
-
-                      <div className="grid gap-3 sm:grid-cols-3">
-                        <input
-                          value={authEmail}
-                          onChange={(e) => setAuthEmail(e.target.value)}
-                          placeholder="email"
-                          className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
-                          autoComplete="email"
+                      {telegramBotUsername ? (
+                        <div
+                          ref={telegramLoginRef}
+                          className="flex min-h-[56px] items-center justify-center rounded-xl border border-white/10 bg-white/5 px-3 py-3"
                         />
-                        <input
-                          value={authPassword}
-                          onChange={(e) => setAuthPassword(e.target.value)}
-                          placeholder="пароль"
-                          type="password"
-                          className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
-                          autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void handleAuthSubmit();
-                          }}
-                          disabled={isAuthBusy}
-                          className="inline-flex items-center justify-center rounded-xl bg-white/10 px-4 py-3 text-xs font-black uppercase tracking-[0.14em] text-white transition hover:bg-white/15 active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {isAuthBusy ? '...' : authMode === 'register' ? 'Создать' : 'Войти'}
-                        </button>
-                      </div>
+                      ) : (
+                        <div className="rounded-xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-amber-200/90">
+                          Вход через Telegram временно недоступен
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/55">
