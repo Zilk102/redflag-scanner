@@ -46,8 +46,6 @@ services:
       TELEGRAM_AUTH_MAX_AGE_SECONDS: ${TELEGRAM_AUTH_MAX_AGE_SECONDS:-}
     expose:
       - "5000"
-    ports:
-      - "5000:5000"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:5000/api/health"]
       interval: 10s
