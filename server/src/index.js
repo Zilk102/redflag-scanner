@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const { execSync } = require('child_process');
+const { execFile, execSync } = require('child_process');
 const crypto = require('crypto');
 const axios = require('axios');
 const express = require('express');
@@ -8,7 +8,10 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { Resvg } = require('@resvg/resvg-js');
 const PDFDocument = require('pdfkit');
+const fs = require('fs');
 const net = require('net');
+const os = require('os');
+const path = require('path');
 const { getPrismaClient } = require('./prismaClient');
 const { YandexGPTService } = require('./services/YandexGPTService');
 
@@ -235,6 +238,38 @@ function anonymizeText(input, options) {
   }
 
   return out;
+}
+
+function sanitizeTextForAi(input) {
+  const base = String(input ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u0000/g, '')
+    .replace(/[\u200B\uFEFF]/g, '')
+    .replace(/[\t\f\v\u00A0]+/g, ' ')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (!base) return '';
+
+  const lines = base.split('\n');
+  const out = [];
+
+  for (const line of lines) {
+    const t = String(line ?? '').trim();
+    if (!t) {
+      out.push('');
+      continue;
+    }
+    if (!/[\p{L}\p{N}]/u.test(t) && t.length <= 2) continue;
+    out.push(t.replace(/\s{2,}/g, ' '));
+  }
+
+  const normalized = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const maxChars = getEnvInt('AI_TEXT_MAX_CHARS') ?? 12000;
+  if (!Number.isFinite(maxChars) || maxChars < 2000) return normalized;
+  if (normalized.length <= maxChars) return normalized;
+  return normalized.slice(normalized.length - maxChars).trim();
 }
 
 function computeAutoDeleteAt({ retentionHours }) {
@@ -875,6 +910,17 @@ const scanLimiter = rateLimit({
   },
 });
 
+const ocrLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  limit: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ error: 'Слишком много распознаваний. Попробуй позже.' });
+  },
+});
+
 const askLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 30,
@@ -1069,6 +1115,86 @@ app.get('/api/health', async (_req, res) => {
     res.status(503).json({ ok: false });
   }
 });
+
+function execFileAsync(command, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function getOcrMaxBytes() {
+  const fromEnv = getEnvInt('OCR_MAX_BYTES');
+  if (fromEnv && Number.isFinite(fromEnv) && fromEnv >= 1024 * 1024 && fromEnv <= 30 * 1024 * 1024) {
+    return Math.trunc(fromEnv);
+  }
+  return 8 * 1024 * 1024;
+}
+
+async function runTesseractOcr({ buffer }) {
+  const lang = (typeof process.env.OCR_LANG === 'string' ? process.env.OCR_LANG.trim() : '') || 'rus+eng';
+  const psm = getEnvInt('OCR_PSM') ?? 6;
+  const timeoutMs = getEnvInt('OCR_TIMEOUT_MS') ?? 20000;
+
+  const tmpBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'rfs-ocr-'));
+  const inputPath = path.join(tmpBase, 'input.png');
+  try {
+    await fs.promises.writeFile(inputPath, buffer);
+    const { stdout } = await execFileAsync(
+      'tesseract',
+      [inputPath, 'stdout', '-l', lang, '--psm', String(psm), '-c', 'preserve_interword_spaces=1'],
+      {
+        timeout: Math.max(3000, Math.min(90000, timeoutMs)),
+        maxBuffer: 6 * 1024 * 1024,
+      },
+    );
+    return String(stdout ?? '');
+  } finally {
+    try {
+      await fs.promises.rm(tmpBase, { recursive: true, force: true });
+    } catch {
+      return;
+    }
+  }
+}
+
+app.post(
+  '/api/ocr',
+  ocrLimiter,
+  express.raw({ type: ['image/png', 'image/jpeg'], limit: getOcrMaxBytes() }),
+  requireCsrf(async (req, res) => {
+    const consent = toBoolean(req.headers['x-consent']);
+    if (consent !== true) {
+      const err = new Error('Нужно согласие на обработку персональных данных');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      const err = new Error('Нужно передать изображение');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    try {
+      const raw = await runTesseractOcr({ buffer: body });
+      const text = sanitizeTextForAi(raw);
+      res.status(200).json({ text });
+    } catch {
+      const err = new Error('Не удалось распознать текст');
+      err.statusCode = 502;
+      throw err;
+    }
+  }),
+);
 
 app.get('/api/auth/csrf', authLimiter, async (req, res, next) => {
   try {
@@ -1459,7 +1585,7 @@ app.post(
       return;
     }
 
-    const textForAi = anonymizeText(text, anonymization);
+    const textForAi = anonymizeText(sanitizeTextForAi(text), anonymization);
     const result = await yandex.analyzeText(textForAi);
 
     const prisma = getPrismaClient();
@@ -1512,7 +1638,7 @@ app.post(
       throw err;
     }
 
-    const textForAi = anonymizeText(text, anonymization);
+    const textForAi = anonymizeText(sanitizeTextForAi(text), anonymization);
     const result = await yandex.scan(textForAi);
 
     const prisma = getPrismaClient();

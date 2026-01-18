@@ -108,6 +108,198 @@ function anonymizeText(input: string) {
     .replace(/@([\p{L}0-9_]{2,})/giu, '@***');
 }
 
+function normalizeOcrText(raw: string) {
+  const base = String(raw ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replaceAll('\u0000', '')
+    .replaceAll('\u200B', '')
+    .replaceAll('\uFEFF', '')
+    .replace(/[\t\f\v\u00A0]+/g, ' ');
+
+  const noisyPhrases = [
+    'закрепл',
+    'был(а) недавно',
+    'был(а) в сети',
+    'в сети',
+    'online',
+    'last seen',
+    'печатает',
+    'typing',
+    'позвонить',
+    'видеозвонок',
+  ];
+
+  const lines = base
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((line) => {
+      const low = line.toLowerCase();
+      return !noisyPhrases.some((p) => low.includes(p));
+    })
+    .map((line) => line.replace(/\s{2,}/g, ' ').trim())
+    .map((line) => {
+      const m = line.match(/^(\d{1,2}:\d{2})\b(.*)$/);
+      if (!m) return line;
+      const time = m[1];
+      const rest = (m[2] ?? '').trim();
+      if (!rest) return time;
+
+      const letters = (rest.match(/[\p{L}]/gu) ?? []).length;
+      const digits = (rest.match(/[\p{N}]/gu) ?? []).length;
+      const keepRest = letters >= 3 || (letters >= 2 && digits >= 2);
+      return keepRest ? `${time} ${rest}` : time;
+    })
+    .filter((line) => {
+      const letters = (line.match(/[\p{L}]/gu) ?? []).length;
+      const digits = (line.match(/[\p{N}]/gu) ?? []).length;
+      if (/^\d{1,2}:\d{2}\b/.test(line)) return true;
+      if (letters >= 3) return true;
+      if (letters >= 2 && digits >= 2) return true;
+      return false;
+    });
+
+  const merged: string[] = [];
+  for (const line of lines) {
+    const prev = merged[merged.length - 1];
+    if (!prev) {
+      merged.push(line);
+      continue;
+    }
+
+    const prevEnds = /[.!?…:]$/.test(prev);
+    const nextStartsLower = /^[\p{Ll}]/u.test(line);
+    const nextLooksNew = /^\d{1,2}:\d{2}\b/.test(line);
+
+    if (!prevEnds && nextStartsLower && !nextLooksNew) {
+      merged[merged.length - 1] = `${prev} ${line}`;
+      continue;
+    }
+
+    merged.push(line);
+  }
+
+  const joined = merged.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (joined.length <= 12000) return joined;
+
+  const cut = joined.slice(0, 12000);
+  const idx = cut.lastIndexOf('\n');
+  return (idx > 2000 ? cut.slice(0, idx) : cut).trim();
+}
+
+async function preprocessImageForOcr(file: File) {
+  const maxSide = 2400;
+  const baseScale = 2.4;
+
+  async function loadBitmap(): Promise<ImageBitmap | HTMLImageElement> {
+    if (typeof createImageBitmap === 'function') {
+      return await createImageBitmap(file);
+    }
+
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('image_load_failed'));
+        img.src = url;
+      });
+      return img;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  const source = await loadBitmap();
+  const w = 'width' in source ? source.width : 0;
+  const h = 'height' in source ? source.height : 0;
+  const safeW = Math.max(1, Math.trunc(w));
+  const safeH = Math.max(1, Math.trunc(h));
+
+  const scale = Math.max(1, Math.min(baseScale, maxSide / Math.max(safeW, safeH)));
+  const outW = Math.max(1, Math.trunc(safeW * scale));
+  const outH = Math.max(1, Math.trunc(safeH * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('canvas_unavailable');
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(source as CanvasImageSource, 0, 0, outW, outH);
+
+  const img = ctx.getImageData(0, 0, outW, outH);
+  const data = img.data;
+
+  const hist = new Uint32Array(256);
+  let sum = 0;
+  const pxCount = outW * outH;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    hist[gray] += 1;
+    sum += gray;
+  }
+
+  const mean = pxCount > 0 ? sum / pxCount : 128;
+  const invert = mean < 120;
+
+  const total = pxCount;
+  let sumAll = 0;
+  for (let i = 0; i < 256; i += 1) sumAll += i * hist[i];
+
+  let sumB = 0;
+  let wB = 0;
+  let wF = 0;
+  let maxVar = -1;
+  let threshold = 160;
+
+  for (let t = 0; t < 256; t += 1) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    wF = total - wB;
+    if (wF === 0) break;
+
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sumAll - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maxVar) {
+      maxVar = between;
+      threshold = t;
+    }
+  }
+
+  const contrast = 1.35;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    let gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    if (invert) gray = 255 - gray;
+    gray = clamp(Math.round((gray - 128) * contrast + 128), 0, 255);
+    const bin = gray > threshold ? 255 : 0;
+    data[i] = bin;
+    data[i + 1] = bin;
+    data[i + 2] = bin;
+    data[i + 3] = 255;
+  }
+
+  ctx.putImageData(img, 0, 0);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob_failed'))), 'image/png');
+  });
+
+  return new File([blob], 'preprocessed.png', { type: 'image/png' });
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -1127,6 +1319,15 @@ export default function App() {
 
     const mod = await import('tesseract.js');
     const worker = await mod.createWorker(['rus', 'eng']);
+    const psm = typeof (mod as unknown as { PSM?: Record<string, unknown> }).PSM === 'object' &&
+      (mod as unknown as { PSM?: Record<string, unknown> }).PSM !== null &&
+      typeof (mod as unknown as { PSM: { SPARSE_TEXT?: unknown } }).PSM.SPARSE_TEXT === 'number'
+      ? (mod as unknown as { PSM: { SPARSE_TEXT: number } }).PSM.SPARSE_TEXT
+      : 11;
+    await (worker as unknown as { setParameters?: (p: Record<string, unknown>) => Promise<void> }).setParameters?.({
+      tessedit_pageseg_mode: psm,
+      preserve_interword_spaces: '1',
+    });
     ocrWorkerRef.current = worker;
     return worker as { recognize: (image: File) => Promise<{ data?: { text?: string } }> };
   }
@@ -1270,8 +1471,26 @@ export default function App() {
       const parts: string[] = [];
 
       for (const file of images) {
-        const result = await worker.recognize(file);
-        const extracted = typeof result?.data?.text === 'string' ? result.data.text.trim() : '';
+        const preprocessed = await preprocessImageForOcr(file);
+        let extracted = '';
+
+        try {
+          await ensureCsrfToken();
+          const bytes = await preprocessed.arrayBuffer();
+          const response = await axios.post<{ text?: string }>('/api/ocr', bytes, {
+            headers: {
+              'Content-Type': preprocessed.type,
+              'X-Consent': 'true',
+            },
+            timeout: 45000,
+          });
+          extracted = normalizeOcrText(typeof response.data?.text === 'string' ? response.data.text : '');
+        } catch {
+          const result = await worker.recognize(preprocessed);
+          const extractedRaw = typeof result?.data?.text === 'string' ? result.data.text : '';
+          extracted = normalizeOcrText(extractedRaw);
+        }
+
         if (extracted) parts.push(extracted);
       }
 
@@ -1292,9 +1511,8 @@ export default function App() {
         id: crypto.randomUUID(),
         tone: 'success',
         title: 'Скриншот распознан',
+        message: 'Проверь текст и нажми «ПРОВЕРИТЬ НА RED FLAGS».',
       });
-
-      await scanText(nextText);
     } catch {
       showToast({
         id: crypto.randomUUID(),

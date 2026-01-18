@@ -3,6 +3,8 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-rus tesseract-ocr-data-eng
+
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
