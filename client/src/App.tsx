@@ -28,6 +28,12 @@ type CsrfResponse = {
   csrfToken?: string;
 };
 
+type TelegramLoginResponse = {
+  ok?: boolean;
+  user?: AuthUser | null;
+  csrfToken?: string;
+};
+
 type ToastState = {
   id: string;
   tone: 'danger' | 'success';
@@ -790,9 +796,6 @@ export default function App() {
 
   const telegramBotUsername =
     (import.meta.env as { VITE_TELEGRAM_BOT_USERNAME?: string }).VITE_TELEGRAM_BOT_USERNAME?.trim() ?? '';
-  const telegramAuthUrl = useMemo(() => {
-    return new URL('/api/auth/telegram/callback', window.location.origin).toString();
-  }, []);
 
   const ai = useMemo(() => parseAiVerdict(scanResult?.result), [scanResult]);
   const loadingLabels = useMemo(
@@ -818,6 +821,18 @@ export default function App() {
     window.setTimeout(() => {
       setToast((current) => (current?.id === next.id ? null : current));
     }, 5000);
+  }, []);
+
+  const refreshMe = useCallback(async () => {
+    try {
+      const response = await axios.get<{ user: AuthUser | null }>('/api/auth/me', {
+        headers: { 'Cache-Control': 'no-store' },
+      });
+      const u = response.data?.user;
+      setAuthUser(u && typeof u.id === 'string' && typeof u.label === 'string' ? u : null);
+    } catch {
+      setAuthUser(null);
+    }
   }, []);
 
   const applyCsrfToken = useCallback((token: string) => {
@@ -852,6 +867,35 @@ export default function App() {
 
     return await csrfInFlightRef.current;
   }, [fetchCsrfToken]);
+
+  const handleTelegramAuth = useCallback(
+    async (user: unknown) => {
+      if (isAuthBusy) return;
+      try {
+        setIsAuthBusy(true);
+        await ensureCsrfToken();
+        const response = await axios.post<TelegramLoginResponse>('/api/auth/telegram/login', user);
+        const nextCsrf = typeof response.data?.csrfToken === 'string' ? response.data.csrfToken : '';
+        if (nextCsrf) applyCsrfToken(nextCsrf);
+        const u = response.data?.user;
+        if (u && typeof u.id === 'string' && typeof u.label === 'string') {
+          setAuthUser(u);
+          return;
+        }
+        await refreshMe();
+      } catch {
+        showToast({
+          id: crypto.randomUUID(),
+          tone: 'danger',
+          title: 'Не удалось войти через Telegram',
+          message: 'Попробуй ещё раз или обнови страницу.',
+        });
+      } finally {
+        setIsAuthBusy(false);
+      }
+    },
+    [applyCsrfToken, ensureCsrfToken, isAuthBusy, refreshMe, showToast],
+  );
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -921,23 +965,23 @@ export default function App() {
   );
 
   useEffect(() => {
-    let cancelled = false;
-    const loadMe = async () => {
-      try {
-        const response = await axios.get<{ user: AuthUser | null }>('/api/auth/me');
-        if (cancelled) return;
-        const u = response.data?.user;
-        setAuthUser(u && typeof u.id === 'string' && typeof u.label === 'string' ? u : null);
-      } catch {
-        if (cancelled) return;
-        setAuthUser(null);
-      }
+    void refreshMe();
+  }, [refreshMe]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      void refreshMe();
     };
-    void loadMe();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void refreshMe();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      cancelled = true;
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, []);
+  }, [refreshMe]);
 
   useEffect(() => {
     if (authUser) setAuthPanelOpen(false);
@@ -950,20 +994,25 @@ export default function App() {
     const host = telegramLoginRef.current;
     if (!host) return;
 
+    (window as unknown as { onTelegramAuth?: (u: unknown) => void }).onTelegramAuth = (u: unknown) => {
+      void handleTelegramAuth(u);
+    };
+
     host.innerHTML = '';
     const script = document.createElement('script');
     script.async = true;
     script.src = 'https://telegram.org/js/telegram-widget.js?22';
     script.setAttribute('data-telegram-login', telegramBotUsername);
     script.setAttribute('data-size', 'large');
-    script.setAttribute('data-auth-url', telegramAuthUrl);
+    script.setAttribute('data-onauth', 'onTelegramAuth(user)');
     script.setAttribute('data-request-access', 'write');
     host.appendChild(script);
 
     return () => {
       host.innerHTML = '';
+      delete (window as unknown as { onTelegramAuth?: (u: unknown) => void }).onTelegramAuth;
     };
-  }, [authPanelOpen, authUser, telegramAuthUrl, telegramBotUsername]);
+  }, [authPanelOpen, authUser, handleTelegramAuth, telegramBotUsername]);
 
   useEffect(() => {
     void ensureCsrfToken();
