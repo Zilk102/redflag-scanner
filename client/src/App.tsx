@@ -62,6 +62,13 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+function normalizeTelegramBotUsername(raw: string) {
+  const trimmed = raw.trim().replace(/^@+/, '');
+  if (!trimmed) return { username: '', isValid: false };
+  const isValid = /^[A-Za-z0-9_]{5,32}$/.test(trimmed);
+  return { username: trimmed, isValid };
+}
+
 async function copyToClipboard(value: string) {
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value);
@@ -794,8 +801,8 @@ export default function App() {
   const csrfInFlightRef = useRef<Promise<string> | null>(null);
   const telegramLoginRef = useRef<HTMLDivElement | null>(null);
 
-  const telegramBotUsername =
-    (import.meta.env as { VITE_TELEGRAM_BOT_USERNAME?: string }).VITE_TELEGRAM_BOT_USERNAME?.trim() ?? '';
+  const telegramBotUsernameRaw = (import.meta.env as { VITE_TELEGRAM_BOT_USERNAME?: string }).VITE_TELEGRAM_BOT_USERNAME ?? '';
+  const telegramBot = useMemo(() => normalizeTelegramBotUsername(telegramBotUsernameRaw), [telegramBotUsernameRaw]);
 
   const ai = useMemo(() => parseAiVerdict(scanResult?.result), [scanResult]);
   const loadingLabels = useMemo(
@@ -990,7 +997,7 @@ export default function App() {
   useEffect(() => {
     if (!authPanelOpen) return;
     if (authUser) return;
-    if (!telegramBotUsername) return;
+    if (!telegramBot.isValid) return;
     const host = telegramLoginRef.current;
     if (!host) return;
 
@@ -1002,7 +1009,7 @@ export default function App() {
     const script = document.createElement('script');
     script.async = true;
     script.src = 'https://telegram.org/js/telegram-widget.js?22';
-    script.setAttribute('data-telegram-login', telegramBotUsername);
+    script.setAttribute('data-telegram-login', telegramBot.username);
     script.setAttribute('data-size', 'large');
     script.setAttribute('data-onauth', 'onTelegramAuth(user)');
     script.setAttribute('data-request-access', 'write');
@@ -1012,7 +1019,7 @@ export default function App() {
       host.innerHTML = '';
       delete (window as unknown as { onTelegramAuth?: (u: unknown) => void }).onTelegramAuth;
     };
-  }, [authPanelOpen, authUser, handleTelegramAuth, telegramBotUsername]);
+  }, [authPanelOpen, authUser, handleTelegramAuth, telegramBot.isValid, telegramBot.username]);
 
   useEffect(() => {
     void ensureCsrfToken();
@@ -1658,14 +1665,14 @@ export default function App() {
 
                   {authPanelOpen ? (
                     <div className="grid gap-3">
-                      {telegramBotUsername ? (
+                      {telegramBot.isValid ? (
                         <div
                           ref={telegramLoginRef}
                           className="flex min-h-[56px] items-center justify-center rounded-xl border border-white/10 bg-white/5 px-3 py-3"
                         />
                       ) : (
                         <div className="rounded-xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-xs font-semibold uppercase tracking-[0.22em] text-amber-200/90">
-                          Вход через Telegram временно недоступен
+                          Неверно настроен VITE_TELEGRAM_BOT_USERNAME
                         </div>
                       )}
                     </div>
