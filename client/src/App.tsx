@@ -538,7 +538,12 @@ function ResultsCard({
         </div>
       ) : null}
 
-      <div className="relative rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
+      <div
+        className={[
+          'relative rounded-3xl border border-white/10 bg-deep-bg/55 p-6',
+          !isPaid ? 'min-h-[260px]' : '',
+        ].join(' ')}
+      >
         <div className={[!isPaid ? 'blur-md select-none' : '', 'transition'].join(' ')}>
           <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Полный разбор</div>
           <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-white/90 sm:text-base">
