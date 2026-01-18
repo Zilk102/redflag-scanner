@@ -61,7 +61,8 @@ services:
     depends_on:
       - server
     ports:
-      - "80:80"
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
     volumes:
       - ${NGINX_CONF_PATH:-./nginx/nginx.conf}:/etc/nginx/nginx.conf:ro
       - ${CLIENT_DIST_PATH:-./client/dist}:/usr/share/nginx/html:ro
