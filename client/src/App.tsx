@@ -464,7 +464,7 @@ function ResultsCard({
       ) : null}
 
       {ai.flags.length ? (
-        <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
+        <div className="relative rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
           <div className={[!isPaid ? 'blur-md select-none' : '', 'transition'].join(' ')}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Красные флаги</div>
@@ -528,7 +528,7 @@ function ResultsCard({
           </div>
 
           {!isPaid ? (
-            <div className="absolute inset-0 grid place-items-center bg-deep-bg/30 p-6">
+            <div className="absolute inset-0 grid place-items-center rounded-3xl bg-deep-bg/30 p-6">
               <div className="grid w-full max-w-md justify-items-center gap-2 text-center">
                 <div className="text-[13px] font-black uppercase tracking-[0.08em] text-white">Открыть красные флаги</div>
                 <div className="text-xs leading-relaxed text-white/70">Оплати, чтобы увидеть детали и ответы</div>
@@ -538,7 +538,7 @@ function ResultsCard({
         </div>
       ) : null}
 
-      <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
+      <div className="relative rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
         <div className={[!isPaid ? 'blur-md select-none' : '', 'transition'].join(' ')}>
           <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Полный разбор</div>
           <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-white/90 sm:text-base">
@@ -547,7 +547,7 @@ function ResultsCard({
         </div>
 
         {!isPaid ? (
-          <div className="absolute inset-0 grid place-items-center bg-deep-bg/30 p-6">
+          <div className="absolute inset-0 grid place-items-center rounded-3xl bg-deep-bg/30 p-6">
             <div className="grid w-full max-w-md justify-items-center gap-3 text-center">
               <button
                 type="button"
@@ -568,13 +568,13 @@ function ResultsCard({
         ) : null}
       </div>
 
-      <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
+      <div className="relative rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
         <div className={[!isPaid ? 'blur-md select-none' : '', 'transition'].join(' ')}>
           <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Совет</div>
           <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-white/90 sm:text-base">{ai.advice}</div>
         </div>
         {!isPaid ? (
-          <div className="absolute inset-0 grid place-items-center bg-deep-bg/30 p-6">
+          <div className="absolute inset-0 grid place-items-center rounded-3xl bg-deep-bg/30 p-6">
             <div className="grid w-full max-w-md justify-items-center gap-2 text-center">
               <div className="text-[13px] font-black uppercase tracking-[0.08em] text-white">Открыть совет и разбор</div>
               <div className="text-xs leading-relaxed text-white/70">Оплати, чтобы увидеть полный отчёт</div>
