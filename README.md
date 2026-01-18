@@ -1,79 +1,209 @@
-# **RedFlag Scanner \- План разработки для Trae AI**
 
-Этот документ содержит пошаговые инструкции для AI-ассистента (Trae) по созданию проекта.
+# RedFlag Scanner
 
-## **Роль AI**
+RedFlag Scanner — веб‑приложение для анализа переписок с помощью YandexGPT: выявляет токсичные паттерны и «красные флаги», показывает рейтинг риска, формирует развёрнутый разбор, генерирует превью для шаринга и PDF‑отчёт.
 
-Ты — Senior Fullstack Developer. Мы пишем проект на стеке: React (Vite) \+ Node.js (Express) \+ PostgreSQL \+ Docker. Мы не используем внешние облачные сервисы (кроме YandexGPT API). Весь деплой будет на VPS через Docker Compose.
+## Что умеет
 
-## **Глобальные переменные и настройки**
+- AI‑анализ переписки: рейтинг 0–100, краткий вердикт, разбор, совет, список флагов с цитатами.
+- Уточняющие вопросы к уже сделанному скану (Q&A поверх результата).
+- История сканов/анализов в базе, удаление по запросу.
+- Публичная ссылка на отчёт (`/r/<shareId>`) и публичный JSON/PDF для шаринга.
+- OG‑картинка для ссылок (SVG/PNG).
+- Экспорт отчёта в PDF.
+- Оплата разблокировки полного отчёта через ЮKassa, обработка webhook с идемпотентностью.
+- Настройки приватности: согласие на обработку, авто‑удаление по TTL, анонимизация текста перед отправкой в AI.
 
-* **Язык:** Русский (интерфейс, логи, комментарии).  
-* **Стилизация:** Tailwind CSS (Mobile First, Dark Mode).  
-* **База данных:** PostgreSQL (локальный контейнер).  
-* **AI Provider:** YandexGPT (через axios запрос к https://www.google.com/search?q=https://llm.api.cloud.yandex.net).
+## Архитектура
 
-## **ШАГ 1: Инициализация проекта и Docker**
+Сервисы и роли:
 
-**Задача:** Создать структуру монорепозитория и настроить контейнеризацию.
+- **server** — Node.js + Express, API, интеграции YandexGPT/ЮKassa, генерация OG/PDF, Prisma.
+- **db** — PostgreSQL.
+- **nginx (edge, опционально)** — reverse proxy и раздача фронта в прод‑схеме (HTTPS + домен).
 
-1. Создай структуру папок:  
-   * /client (React \+ Vite)  
-   * /server (Node.js \+ Express)  
-   * /nginx (конфиги nginx)  
-2. Создай docker-compose.yml в корне.  
-   * Сервис db: image postgres:15-alpine. Пробрось порты, настрой volumes.  
-   * Сервис server: build context ./server. Зависит от db. Env variables из файла .env.  
-   * Сервис client: build context ./client.  
-   * Сервис nginx: image nginx:alpine. Должен проксировать /api на сервис server:5000 и остальное на client:80 (или раздавать статику клиента).  
-3. Сгенерируй .env.example с полями:  
-   * POSTGRES\_USER, POSTGRES\_PASSWORD, POSTGRES\_DB  
-   * YANDEX\_API\_KEY, YANDEX\_FOLDER\_ID  
-   * PORT  
-   * JWT\_SECRET
+База данных управляется Prisma migrations (автоприменение при старте server, если не отключено переменной окружения).
 
-## **ШАГ 2: Backend (Server)**
+## Быстрый старт (локально)
 
-**Задача:** Реализовать API для анализа текста и работы с БД.
+Политика проекта: выполнение приложения — только в Docker. На хосте используем команды только для сборки/линта/тайпчека.
 
-1. В папке /server:  
-   * npm init \-y  
-   * Установи: express, cors, dotenv, pg, axios, yookassa (SDK).  
-2. Настройка БД:  
-   * Создай таблицу scans (id, text\_content, analysis\_json, is\_paid, created\_at).  
-   * Используй чистый pg (node-postgres) или sequelize/prisma (на твой выбор, лучше проще \- pg).  
-3. Интеграция YandexGPT:  
-   * Создай модуль yandexGpt.js.  
-   * Реализуй функцию отправки запроса.  
-   * **Важно:** Системный промпт для YandexGPT:"Ты — циничный психолог-эксперт. Проанализируй текст пользователя. Найди признаки манипуляции, газлайтинга, абьюза или любви. Выдай ответ в формате JSON: { rating: число 0-100, verdict: 'краткая фраза', details: 'подробный разбор', advice: 'совет' }. Будь краток и эмоционален."  
-4. API Routes:  
-   * POST /api/scan: Принимает текст. Если текст короткий (\<500 символов) — анализирует бесплатно (урезанный ответ). Если длинный — требует оплату (возвращает статус payment\_required).  
-   * POST /api/pay: Создает платеж в ЮKassa.
+### 1) Подготовить `.env`
 
-## **ШАГ 3: Frontend (Client)**
+В корне проекта (рядом с `docker-compose.yml`):
 
-**Задача:** Создать интерфейс.
+```bash
+cp .env.example .env
+```
 
-1. В папке /client:  
-   * npm create vite@latest . \-- \--template react  
-   * Установи tailwindcss, postcss, autoprefixer, axios.  
-2. Компоненты:  
-   * HeroSection: Заголовок "Узнай, кто он(а) на самом деле". Поле textarea для ввода.  
-   * ResultCard: Появляется после анализа.  
-     * Визуализируй рейтинг токсичности (Progress Bar, красный цвет).  
-     * Текст вердикта.  
-     * Кнопка "Купить полный разбор" (если версия бесплатная).  
-3. Логика:  
-   * Отправка текста на бэкенд.  
-   * Обработка состояний (Loading, Success, Error).  
-   * Анимации появления результатов.
+Заполни минимум:
 
-## **ШАГ 4: Сборка и Запуск**
+```env
+# PostgreSQL
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=redflag_scanner
 
-**Задача:** Проверить работоспособность.
+# Backend
+PORT=5000
+SESSION_SECRET=replace_me_with_32+_chars_secret
 
-1. Напиши скрипт для локального запуска (без докера) для разработки (npm run dev в обоих папках).  
-2. Проверь, что Nginx конфиг корректен.
+# YandexGPT
+YANDEX_FOLDER_ID=
+YANDEX_API_KEY=
 
-Инструкция для разработчика (меня):  
-Выполняй эти шаги последовательно. Начинай с Шага 1\. Не переходи к следующему шагу, пока текущий не будет полностью реализован и протестирован (код компилируется).
+# ЮKassa
+YOOKASSA_SHOP_ID=
+YOOKASSA_SECRET_KEY=
+YOOKASSA_RETURN_URL=http://localhost/
+
+# Webhook защита (обязателен хотя бы один барьер)
+YOOKASSA_WEBHOOK_TOKEN=
+YOOKASSA_WEBHOOK_ALLOWED_CIDRS=
+```
+
+### 2) Поднять API и базу
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+Проверка здоровья API:
+
+```bash
+docker compose exec -T server wget -qO- http://localhost:5000/api/health
+```
+
+Ожидаемый ответ:
+
+```json
+{"ok":true}
+```
+
+### 3) Фронтенд
+
+В репозитории есть сборка фронта (Vite → `client/dist`) и nginx‑конфиги, но **edge‑nginx** рассчитан на прод‑домен и TLS‑сертификаты.
+
+- Для прод‑схемы с доменом и HTTPS используй профиль `edge`:
+
+```bash
+docker compose --profile edge up -d --build
+```
+
+Требование: в контейнер `nginx` должны быть проброшены реальные сертификаты Let’s Encrypt, а `client/dist` должен существовать (собран заранее).
+
+Подробный сценарий деплоя: [DEPLOY.md](file:///d:/PROJECT/project1/DEPLOY.md)
+
+## API
+
+База: все запросы идут на тот же origin, что и фронт. Для cookie‑авторизации клиент отправляет `withCredentials=true`.
+
+### Auth и CSRF
+
+- `GET /api/auth/me` → текущий пользователь или `null`.
+- `GET /api/auth/csrf` → выдаёт CSRF токен и кладёт cookie `csrf`.
+- `POST /api/auth/register` (CSRF) → регистрация, устанавливает `sid` (HTTP‑only cookie) и обновляет CSRF.
+- `POST /api/auth/login` (CSRF) → логин, устанавливает `sid` и обновляет CSRF.
+- `POST /api/auth/logout` (CSRF) → логаут, удаляет `sid` и обновляет CSRF.
+
+CSRF защита: двойная отправка cookie + заголовок `X-CSRF-Token`, плюс проверка Origin/Referer на соответствие разрешённым origin.
+
+### Сканирование и анализ
+
+- `POST /api/scan` (auth + CSRF) → создать скан переписки.
+- `GET /api/scan/:id` (auth) → получить свой скан.
+- `DELETE /api/scan/:id` (auth + CSRF) → удалить свой скан.
+- `POST /api/scan/:id/ask` (auth + CSRF) → задать вопрос по результату.
+
+- `POST /api/analyze` (auth + CSRF) → создать анализ (схож с `scan`, используется отдельная сущность).
+- `DELETE /api/analysis/:id` (auth + CSRF) → удалить свой анализ.
+
+### Публичный доступ и файлы
+
+- `GET /r/:token` → HTML‑лендинг для шаринга отчёта.
+- `GET /api/scan/public/:token` → публичный JSON (для не оплаченного контент редактируется).
+- `GET /api/scan/public/:token.pdf` → публичный PDF.
+- `GET /api/og/scan/:token.svg` → OG превью (SVG).
+- `GET /api/og/scan/:token.png` → OG превью (PNG).
+
+### Оплата (ЮKassa)
+
+- `POST /api/pay` (auth + CSRF) → создать оплату для скана или анализа.
+- `POST /api/payment/create` (auth + CSRF) → альтернативный endpoint создания оплаты (для analysis).
+- `POST /api/payment/webhook` → webhook ЮKassa.
+- `POST /api/payment/webhook/:token` → webhook с токеном в URL.
+
+Webhook:
+
+- Верифицируется токеном и/или белым списком CIDR.
+- Идемпотентность: события фиксируются в таблице `payment_webhook_events` (Prisma модель `PaymentWebhookEvent`).
+
+### Служебные
+
+- `GET /api/health` → проверка доступности API и БД.
+
+## Переменные окружения (основные)
+
+Переменные задаются в `.env` в корне проекта и подхватываются `docker-compose.yml`.
+
+### PostgreSQL
+
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+
+### Backend (server)
+
+- `PORT` — порт API внутри контейнера.
+- `SESSION_SECRET` — секрет для хеширования токенов сессии (минимум 32 символа).
+- `CORS_ORIGIN` — список origin через запятую (если пусто, CORS разрешает любой origin).
+- `COOKIE_SECURE` — принудительно ставить Secure cookie (`true/false`), иначе определяется по запросу.
+- `COOKIE_SAMESITE` — `Lax`/`Strict`/`None`.
+- `SESSION_TTL_HOURS` — TTL сессии (по умолчанию 720).
+- `CSRF_TTL_HOURS` — TTL CSRF cookie (по умолчанию 24).
+- `SCAN_RETENTION_HOURS`, `ANALYSIS_RETENTION_HOURS` — авто‑удаление по TTL (часов).
+- `AUTO_DELETE_ENABLED` — включить фон‑удаление записей по `autoDeleteAt`.
+- `AUTO_DELETE_INTERVAL_MS` — интервал фон‑удаления.
+- `DISABLE_PRISMA_MIGRATE=true` — отключить `prisma migrate deploy` при старте.
+
+### YandexGPT
+
+- `YANDEX_FOLDER_ID` — обязателен.
+- Один из вариантов авторизации:
+  - `YANDEX_API_KEY` или `YANDEX_CLOUD_API_KEY`
+  - `YANDEX_IAM_TOKEN`
+- Тюнинг/устойчивость:
+  - `YANDEX_GPT_API_URL`, `YANDEX_GPT_TEMPERATURE`, `YANDEX_GPT_MAX_TOKENS`, `YANDEX_GPT_TIMEOUT_MS`, `YANDEX_GPT_MAX_RETRIES`
+  - `YANDEX_GPT_CB_FAILURES`, `YANDEX_GPT_CB_OPEN_MS`
+  - `YANDEX_GPT_MAX_CONCURRENT`, `YANDEX_GPT_MIN_INTERVAL_MS`
+
+### ЮKassa
+
+- `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY` — обязательно для оплаты.
+- `YOOKASSA_RETURN_URL` — куда возвращать пользователя после оплаты (URL фронтенда).
+- Webhook защита (нужно минимум одно):
+  - `YOOKASSA_WEBHOOK_TOKEN`
+  - `YOOKASSA_WEBHOOK_ALLOWED_CIDRS` (список через запятую)
+
+### Фронтенд (client)
+
+- `VITE_YM_ID` — Yandex Metrika counter id (опционально).
+
+## Разработка: команды (на хосте)
+
+Фронтенд:
+
+```bash
+cd client
+npm ci
+npm run lint
+npm run typecheck
+npm run build
+```
+
+Бэкенд управляется через Docker Compose (см. выше).
+
+## Материалы в репозитории
+
+- [DEPLOY.md](file:///d:/PROJECT/project1/DEPLOY.md) — деплой на Ubuntu/Debian.
+- `docker-compose.yml` — стек (db, server, опциональный edge‑nginx).
+- `server/prisma` — схема БД и миграции.

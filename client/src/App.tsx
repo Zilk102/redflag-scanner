@@ -4,12 +4,28 @@ import { AlertTriangle, CheckCircle, HeartCrack } from 'lucide-react';
 import { Helmet } from 'react-helmet-async';
 import { reachGoal } from './utils/analytics';
 
+axios.defaults.withCredentials = true;
+
 type ScanResponse = {
   id: string;
+  shareId?: string;
+  isPublic?: boolean;
+  userId?: string | null;
   text: string;
   result: unknown;
   isPaid: boolean;
   createdAt: string;
+  autoDeleteAt?: string | null;
+  anonymization?: unknown;
+};
+
+type AuthUser = {
+  id: string;
+  email: string;
+};
+
+type CsrfResponse = {
+  csrfToken?: string;
 };
 
 type ToastState = {
@@ -25,10 +41,97 @@ type AiVerdict = {
   teaser: string;
   full_analysis: string;
   advice: string;
+  flags: AiFlag[];
+};
+
+type AiFlag = {
+  category: string;
+  severity: number;
+  quote: string;
+  explanation: string;
+  what_to_reply: string;
 };
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
+}
+
+async function copyToClipboard(value: string) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  if (typeof document === 'undefined') throw new Error('clipboard_unavailable');
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '0';
+  textarea.style.left = '0';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!ok) throw new Error('clipboard_failed');
+}
+
+function buildShareUrl(scanId: string) {
+  const url = new URL(window.location.href);
+  url.pathname = `/r/${encodeURIComponent(scanId)}`;
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+function anonymizeText(input: string) {
+  return input
+    .replace(/https?:\/\/\S+/gi, '[ссылка]')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
+    .replace(/\+?\d[\d\s\-()]{7,}\d/g, '[телефон]')
+    .replace(/@([\p{L}0-9_]{2,})/giu, '@***');
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function highlightQuotes(text: string, quotes: string[]) {
+  const cleanQuotes = Array.from(
+    new Set(
+      quotes
+        .map((q) => q.trim())
+        .filter((q) => q.length >= 6)
+        .slice(0, 10),
+    ),
+  );
+
+  if (!text || cleanQuotes.length === 0) return [{ kind: 'text', value: text }] as const;
+
+  const pattern = cleanQuotes
+    .sort((a, b) => b.length - a.length)
+    .map((q) => escapeRegExp(q))
+    .join('|');
+
+  if (!pattern) return [{ kind: 'text', value: text }] as const;
+  const re = new RegExp(pattern, 'g');
+
+  const parts: { kind: 'text' | 'mark'; value: string }[] = [];
+  let lastIndex = 0;
+  for (const m of text.matchAll(re)) {
+    const idx = m.index ?? 0;
+    const match = m[0] ?? '';
+    if (!match) continue;
+    if (idx > lastIndex) parts.push({ kind: 'text', value: text.slice(lastIndex, idx) });
+    parts.push({ kind: 'mark', value: match });
+    lastIndex = idx + match.length;
+  }
+  if (lastIndex < text.length) parts.push({ kind: 'text', value: text.slice(lastIndex) });
+
+  return parts;
 }
 
 function extractAiText(result: unknown) {
@@ -66,6 +169,34 @@ function extractAiText(result: unknown) {
 }
 
 function parseAiVerdict(result: unknown): AiVerdict | null {
+  function normalizeFlags(value: unknown): AiFlag[] {
+    if (!Array.isArray(value)) return [];
+    const out: AiFlag[] = [];
+
+    for (const item of value) {
+      if (typeof item !== 'object' || item === null) continue;
+      const i = item as Record<string, unknown>;
+
+      const category = typeof i.category === 'string' ? i.category.trim() : '';
+      const severity = Number(i.severity);
+      const quote = typeof i.quote === 'string' ? i.quote.trim() : '';
+      const explanation = typeof i.explanation === 'string' ? i.explanation.trim() : '';
+      const what = typeof i.what_to_reply === 'string' ? i.what_to_reply.trim() : '';
+
+      if (!category || !Number.isFinite(severity)) continue;
+
+      out.push({
+        category,
+        severity: clamp(Math.round(severity), 0, 100),
+        quote,
+        explanation,
+        what_to_reply: what,
+      });
+    }
+
+    return out.slice(0, 12);
+  }
+
   function normalize(parsed: unknown): AiVerdict | null {
     if (typeof parsed !== 'object' || parsed === null) return null;
     const p = parsed as Record<string, unknown>;
@@ -75,6 +206,7 @@ function parseAiVerdict(result: unknown): AiVerdict | null {
     const teaser = p.teaser;
     const fullAnalysis = p.full_analysis ?? p.analysis;
     const advice = p.advice;
+    const flags = normalizeFlags(p.flags);
 
     if (!Number.isFinite(rating)) return null;
     if (
@@ -106,6 +238,7 @@ function parseAiVerdict(result: unknown): AiVerdict | null {
       teaser: (typeof teaser === 'string' ? teaser : derivedTeaser).trim(),
       full_analysis: normalizedFull,
       advice: advice.trim(),
+      flags,
     };
   }
 
@@ -215,9 +348,32 @@ function RatingCircle({ rating }: { rating: number }) {
   );
 }
 
-function ResultsCard({ ai, isPaid, onPay }: { ai: AiVerdict; isPaid: boolean; onPay: () => void }) {
+function ResultsCard({
+  ai,
+  isPaid,
+  autoDeleteAt,
+  onPay,
+  onShare,
+  onCopy,
+  onDownload,
+  onDownloadPdf,
+  onDownloadImage,
+  onDelete,
+}: {
+  ai: AiVerdict;
+  isPaid: boolean;
+  autoDeleteAt?: string | null;
+  onPay: () => void;
+  onShare: () => void;
+  onCopy: () => void;
+  onDownload: () => void;
+  onDownloadPdf: () => void;
+  onDownloadImage: () => void;
+  onDelete: () => void;
+}) {
   const ratingLabel = ai.rating >= 80 ? 'срочно беги' : ai.rating >= 50 ? 'осторожно' : 'похоже норм';
   const badge = getLevelColor(ai.rating);
+  const [openFlagIndex, setOpenFlagIndex] = useState<number | null>(null);
 
   return (
     <div className="grid gap-6 rounded-3xl border border-white/10 bg-card-bg/60 p-6 backdrop-blur sm:p-8">
@@ -237,6 +393,150 @@ function ResultsCard({ ai, isPaid, onPay }: { ai: AiVerdict; isPaid: boolean; on
           {ai.teaser}
         </div>
       </div>
+
+      <div className="grid gap-3 sm:grid-cols-6">
+        <button
+          type="button"
+          onClick={() => {
+            reachGoal('share_click');
+            onShare();
+          }}
+          className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+        >
+          Поделиться
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            reachGoal('copy_result');
+            onCopy();
+          }}
+          className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+        >
+          Скопировать
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            reachGoal('download_result');
+            onDownload();
+          }}
+          className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+        >
+          Скачать
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            reachGoal('download_pdf');
+            onDownloadPdf();
+          }}
+          className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+        >
+          PDF
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            reachGoal('download_image');
+            onDownloadImage();
+          }}
+          className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+        >
+          Картинка
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            reachGoal('delete_scan_click');
+            onDelete();
+          }}
+          className="inline-flex items-center justify-center rounded-2xl border border-red-500/35 bg-red-500/10 px-4 py-4 text-sm font-black uppercase tracking-[0.14em] text-red-100 transition hover:bg-red-500/15 active:bg-red-500/10"
+        >
+          Удалить
+        </button>
+      </div>
+
+      {autoDeleteAt ? (
+        <div className="text-center text-xs font-semibold uppercase tracking-[0.22em] text-white/55">
+          Автоудаление: {new Date(autoDeleteAt).toLocaleString('ru-RU')}
+        </div>
+      ) : null}
+
+      {ai.flags.length ? (
+        <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
+          <div className={[!isPaid ? 'blur-md select-none' : '', 'transition'].join(' ')}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Красные флаги</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/40">{ai.flags.length} шт.</div>
+            </div>
+
+            <div className="mt-4 grid gap-3">
+              {ai.flags.map((f, idx) => {
+                const color = getLevelColor(f.severity);
+                const isOpen = openFlagIndex === idx;
+                return (
+                  <div key={`${f.category}-${idx}`} className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <button
+                      type="button"
+                      onClick={() => setOpenFlagIndex((cur) => (cur === idx ? null : idx))}
+                      className="flex w-full items-center justify-between gap-3 text-left"
+                    >
+                      <div className="grid gap-1">
+                        <div className="text-sm font-black uppercase tracking-[0.10em] text-white">
+                          {f.category}
+                        </div>
+                        <div className="text-xs text-white/65">Серьёзность: {f.severity}/100</div>
+                      </div>
+                      <div className={['h-3 w-3 rounded-full', color.stroke.replace('stroke-', 'bg-')].join(' ')} />
+                    </button>
+
+                    {isOpen ? (
+                      <div className="mt-4 grid gap-3">
+                        {f.quote ? (
+                          <div className="rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 text-sm text-white/85">
+                            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/50">Цитата</div>
+                            <div className="mt-2 whitespace-pre-wrap leading-relaxed">{f.quote}</div>
+                          </div>
+                        ) : null}
+                        {f.explanation ? (
+                          <div className="text-sm leading-relaxed text-white/85">{f.explanation}</div>
+                        ) : null}
+                        {f.what_to_reply ? (
+                          <div className="grid gap-2">
+                            <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/50">Что ответить</div>
+                            <div className="rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 text-sm text-white/90">
+                              {f.what_to_reply}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await copyToClipboard(f.what_to_reply).catch(() => null);
+                              }}
+                              className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-xs font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+                            >
+                              Скопировать ответ
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {!isPaid ? (
+            <div className="absolute inset-0 grid place-items-center bg-deep-bg/30 p-6">
+              <div className="grid w-full max-w-md justify-items-center gap-2 text-center">
+                <div className="text-[13px] font-black uppercase tracking-[0.08em] text-white">Открыть красные флаги</div>
+                <div className="text-xs leading-relaxed text-white/70">Оплати, чтобы увидеть детали и ответы</div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
         <div className={[!isPaid ? 'blur-md select-none' : '', 'transition'].join(' ')}>
@@ -263,6 +563,21 @@ function ResultsCard({ ai, isPaid, onPay }: { ai: AiVerdict; isPaid: boolean; on
                 <span className="text-[12px] font-extrabold leading-tight text-white/90 sm:text-sm">149 ₽</span>
               </button>
               <div className="text-xs leading-relaxed text-white/70">Узнай, что он на самом деле имел в виду</div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
+        <div className={[!isPaid ? 'blur-md select-none' : '', 'transition'].join(' ')}>
+          <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Совет</div>
+          <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-white/90 sm:text-base">{ai.advice}</div>
+        </div>
+        {!isPaid ? (
+          <div className="absolute inset-0 grid place-items-center bg-deep-bg/30 p-6">
+            <div className="grid w-full max-w-md justify-items-center gap-2 text-center">
+              <div className="text-[13px] font-black uppercase tracking-[0.08em] text-white">Открыть совет и разбор</div>
+              <div className="text-xs leading-relaxed text-white/70">Оплати, чтобы увидеть полный отчёт</div>
             </div>
           </div>
         ) : null}
@@ -356,22 +671,87 @@ function ThankYouModal({ open, onClose }: { open: boolean; onClose: () => void }
   );
 }
 
+function DeleteConfirmModal({
+  open,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-40 grid place-items-center p-4">
+      <button
+        type="button"
+        aria-label="Закрыть"
+        onClick={onClose}
+        className="absolute inset-0 bg-slate-950/70 backdrop-blur"
+      />
+      <div className="relative z-10 w-full max-w-lg overflow-hidden rounded-3xl border border-white/10 bg-deep-bg/90 p-6 shadow-[0_0_80px_rgba(0,0,0,0.55)] backdrop-blur sm:p-8">
+        <div className="grid gap-4">
+          <div className="text-2xl font-black tracking-tight text-white">Удалить скан?</div>
+          <div className="text-sm leading-relaxed text-white/80">
+            Мы удалим текст переписки и результат анализа с сервера. Ссылки на этот отчёт перестанут работать.
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-6 py-4 text-sm font-black uppercase tracking-wide text-white/90 transition hover:bg-white/10 active:bg-white/5"
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                reachGoal('delete_scan_confirm');
+                onConfirm();
+              }}
+              className="w-full rounded-2xl bg-red-500 px-6 py-4 text-sm font-black uppercase tracking-wide text-white transition hover:brightness-110 active:brightness-95"
+            >
+              Удалить
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [text, setText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
   const [isOcrLoading, setIsOcrLoading] = useState(false);
+  const [isScanLoading, setIsScanLoading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [consentAccepted, setConsentAccepted] = useState(false);
+  const [anonymizeEnabled, setAnonymizeEnabled] = useState(true);
+  const [retentionPreset, setRetentionPreset] = useState<'default' | '24h' | '7d' | 'off'>('default');
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isAuthBusy, setIsAuthBusy] = useState(false);
   const [loadingLabelIndex, setLoadingLabelIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
   const [scanResult, setScanResult] = useState<ScanResponse | null>(null);
   const [isPaid, setIsPaid] = useState(false);
   const [thankYouOpen, setThankYouOpen] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [askQuestion, setAskQuestion] = useState('');
+  const [askAnswer, setAskAnswer] = useState('');
+  const [isAsking, setIsAsking] = useState(false);
 
   const screenshotInputRef = useRef<HTMLInputElement | null>(null);
   const ocrWorkerRef = useRef<unknown>(null);
+
+  const csrfTokenRef = useRef('');
+  const csrfInFlightRef = useRef<Promise<string> | null>(null);
 
   const ai = useMemo(() => parseAiVerdict(scanResult?.result), [scanResult]);
   const loadingLabels = useMemo(
@@ -399,67 +779,158 @@ export default function App() {
     }, 5000);
   }, []);
 
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    const paymentStatus = url.searchParams.get('payment');
-    if (paymentStatus !== 'success') return;
+  const applyCsrfToken = useCallback((token: string) => {
+    const t = token.trim();
+    csrfTokenRef.current = t;
+    if (t) {
+      axios.defaults.headers.common['X-CSRF-Token'] = t;
+    } else {
+      delete axios.defaults.headers.common['X-CSRF-Token'];
+    }
+  }, []);
 
-    showToast({
-      id: crypto.randomUUID(),
-      tone: 'success',
-      title: 'Оплата прошла успешно! Открываем отчет...',
+  const fetchCsrfToken = useCallback(async () => {
+    const response = await axios.get<CsrfResponse>('/api/auth/csrf', {
+      headers: { 'Cache-Control': 'no-store' },
     });
-    setThankYouOpen(true);
+    const token = typeof response.data?.csrfToken === 'string' ? response.data.csrfToken.trim() : '';
+    if (!token) throw new Error('csrf_missing');
+    applyCsrfToken(token);
+    return token;
+  }, [applyCsrfToken]);
 
-    const scanId = url.searchParams.get('scanId');
-    if (scanId) {
+  const ensureCsrfToken = useCallback(async () => {
+    const existing = csrfTokenRef.current;
+    if (existing) return existing;
+
+    if (!csrfInFlightRef.current) {
+      csrfInFlightRef.current = fetchCsrfToken().finally(() => {
+        csrfInFlightRef.current = null;
+      });
+    }
+
+    return await csrfInFlightRef.current;
+  }, [fetchCsrfToken]);
+
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+
+  const resetUrlParams = useCallback((keys: string[]) => {
+    const url = new URL(window.location.href);
+    for (const k of keys) url.searchParams.delete(k);
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+
+  const loadScanById = useCallback(
+    (scanId: string, options?: { pollUntilPaid?: boolean }) => {
+      const trimmed = scanId.trim();
+      if (!trimmed) return;
+      setIsScanLoading(true);
+      setError(null);
+      setScanResult(null);
+      setIsPaid(false);
+
       let cancelled = false;
       let timeoutId: number | null = null;
 
-      const loadScan = async (attempt: number) => {
+      const load = async (attempt: number) => {
         try {
-          const response = await axios.get<ScanResponse>(`/api/scan/${encodeURIComponent(scanId)}`);
+          const response = await axios.get<ScanResponse>(`/api/scan/public/${encodeURIComponent(trimmed)}`);
           if (cancelled) return;
           setScanResult(response.data);
           setIsPaid(Boolean(response.data.isPaid));
+          window.setTimeout(() => {
+            resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 50);
 
-          if (!response.data.isPaid && attempt < 12) {
-            timeoutId = window.setTimeout(() => {
-              void loadScan(attempt + 1);
-            }, 1200);
-            return;
-          }
-
-          if (!response.data.isPaid) {
-            showToast({
-              id: crypto.randomUUID(),
-              tone: 'danger',
-              title: 'Оплата ещё подтверждается',
-              message: 'Если отчёт не открылся, подожди минуту и обнови страницу.',
-            });
+          const shouldPoll = options?.pollUntilPaid === true;
+          if (shouldPoll && !response.data.isPaid) {
+            if (attempt < 12) {
+              timeoutId = window.setTimeout(() => {
+                void load(attempt + 1);
+              }, 1200);
+            } else {
+              showToast({
+                id: crypto.randomUUID(),
+                tone: 'danger',
+                title: 'Оплата ещё подтверждается',
+                message: 'Если отчёт не открылся, подожди минуту и обнови страницу.',
+              });
+            }
           }
         } catch {
           if (cancelled) return;
           showToast({
             id: crypto.randomUUID(),
             tone: 'danger',
-            title: 'Не удалось загрузить отчёт. Попробуй обновить страницу.',
+            title: 'Не удалось загрузить отчёт. Проверь ссылку и попробуй ещё раз.',
           });
+        } finally {
+          if (!cancelled && attempt === 0) setIsScanLoading(false);
         }
       };
 
-      void loadScan(0);
+      void load(0);
 
       return () => {
         cancelled = true;
         if (timeoutId !== null) window.clearTimeout(timeoutId);
       };
+    },
+    [showToast],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadMe = async () => {
+      try {
+        const response = await axios.get<{ user: AuthUser | null }>('/api/auth/me');
+        if (cancelled) return;
+        const u = response.data?.user;
+        setAuthUser(u && typeof u.id === 'string' && typeof u.email === 'string' ? u : null);
+      } catch {
+        if (cancelled) return;
+        setAuthUser(null);
+      }
+    };
+    void loadMe();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    void ensureCsrfToken();
+  }, [ensureCsrfToken]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const paymentStatus = url.searchParams.get('payment');
+    const shareId = url.searchParams.get('shareId');
+    const isPaymentSuccess = paymentStatus === 'success';
+
+    const match = url.pathname.match(/^\/r\/([^/]+)\/?$/);
+    const pathShareId = match?.[1] ? decodeURIComponent(match[1]) : '';
+
+    if (isPaymentSuccess) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'success',
+        title: 'Оплата прошла успешно! Открываем отчет...',
+      });
+      setThankYouOpen(true);
     }
 
-    url.searchParams.delete('payment');
-    url.searchParams.delete('scanId');
-    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-  }, [showToast]);
+    const effectiveShareId = shareId || pathShareId;
+    if (effectiveShareId) {
+      const cleanup = loadScanById(effectiveShareId, { pollUntilPaid: isPaymentSuccess });
+      if (isPaymentSuccess) resetUrlParams(['payment']);
+      return () => {
+        if (typeof cleanup === 'function') cleanup();
+      };
+    }
+
+    if (isPaymentSuccess) resetUrlParams(['payment', 'shareId', 'analysisId']);
+  }, [loadScanById, resetUrlParams, showToast]);
 
   useEffect(() => {
     return () => {
@@ -467,6 +938,63 @@ export default function App() {
       current?.terminate?.();
     };
   }, []);
+
+  const handleAuthSubmit = useCallback(async () => {
+    if (isAuthBusy) return;
+    const email = authEmail.trim();
+    const password = authPassword;
+    if (!email || !password) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Заполни email и пароль',
+      });
+      return;
+    }
+
+    try {
+      setIsAuthBusy(true);
+      await ensureCsrfToken();
+      const url = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+      const response = await axios.post<{ user: AuthUser; csrfToken?: string }>(url, { email, password });
+      const u = response.data?.user;
+      if (!u || typeof u.id !== 'string' || typeof u.email !== 'string') throw new Error('bad_user');
+      const nextCsrf = typeof response.data?.csrfToken === 'string' ? response.data.csrfToken : '';
+      if (nextCsrf) applyCsrfToken(nextCsrf);
+      setAuthUser(u);
+      setAuthPassword('');
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'success',
+        title: authMode === 'register' ? 'Аккаунт создан' : 'Ты вошёл(а)',
+      });
+    } catch {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Не удалось войти',
+        message: 'Проверь email/пароль и попробуй ещё раз.',
+      });
+    } finally {
+      setIsAuthBusy(false);
+    }
+  }, [applyCsrfToken, authEmail, authMode, authPassword, ensureCsrfToken, isAuthBusy, showToast]);
+
+  const handleLogout = useCallback(async () => {
+    if (isAuthBusy) return;
+    try {
+      setIsAuthBusy(true);
+      await ensureCsrfToken();
+      const response = await axios.post<{ ok?: boolean; csrfToken?: string }>('/api/auth/logout');
+      const nextCsrf = typeof response.data?.csrfToken === 'string' ? response.data.csrfToken : '';
+      if (nextCsrf) applyCsrfToken(nextCsrf);
+    } catch {
+      return;
+    } finally {
+      setAuthUser(null);
+      setIsAuthBusy(false);
+    }
+  }, [applyCsrfToken, ensureCsrfToken, isAuthBusy]);
 
   async function ensureOcrWorker() {
     if (ocrWorkerRef.current) return ocrWorkerRef.current as { recognize: (image: File) => Promise<{ data?: { text?: string } }> };
@@ -480,6 +1008,16 @@ export default function App() {
   async function scanText(input: string) {
     const trimmed = input.trim();
     const shortTextToastTitle = 'Слишком мало данных. Напиши подробнее!';
+
+    if (!authUser) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Нужна авторизация',
+        message: 'Войди или зарегистрируйся, чтобы создать отчёт и управлять им.',
+      });
+      return;
+    }
 
     if (!consentAccepted) {
       showToast({
@@ -519,7 +1057,16 @@ export default function App() {
     setIsPaid(false);
 
     try {
-      const response = await axios.post<ScanResponse>('/api/scan', { text: trimmed, consent: true });
+      await ensureCsrfToken();
+      const payloadText = anonymizeEnabled ? anonymizeText(trimmed) : trimmed;
+      const retentionHours =
+        retentionPreset === '24h' ? 24 : retentionPreset === '7d' ? 168 : retentionPreset === 'off' ? 0 : undefined;
+      const response = await axios.post<ScanResponse>('/api/scan', {
+        text: payloadText,
+        consent: true,
+        anonymization: { enabled: anonymizeEnabled },
+        retentionHours,
+      });
       setScanResult(response.data);
       reachGoal('scan_success');
       showToast({
@@ -647,8 +1194,19 @@ export default function App() {
   async function handlePayment() {
     if (isPaying) return;
 
+    if (!authUser) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Нужна авторизация',
+        message: 'Войди, чтобы оплатить и открыть полный отчёт.',
+      });
+      return;
+    }
+
     try {
       setIsPaying(true);
+      await ensureCsrfToken();
       const response = await axios.post<{ confirmation_url: string }>('/api/pay', {
         scanId: scanResult?.id ?? undefined,
       });
@@ -675,6 +1233,239 @@ export default function App() {
     }
   }
 
+  async function handleShare() {
+    const id = scanResult?.shareId;
+    if (!id || !ai) return;
+
+    const url = buildShareUrl(id);
+    const textToShare = `Рейтинг: ${ai.rating}/100\n${ai.short_verdict}\n\n${ai.teaser}`;
+
+    try {
+      const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+      if (canShare) {
+        await navigator.share({
+          title: 'RedFlag Scanner',
+          text: textToShare,
+          url,
+        });
+      } else {
+        await copyToClipboard(url);
+      }
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'success',
+        title: canShare ? 'Отправлено' : 'Ссылка скопирована',
+      });
+    } catch {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Не удалось поделиться',
+        message: 'Попробуй скопировать ссылку вручную из адресной строки.',
+      });
+    }
+  }
+
+  async function handleCopy() {
+    if (!ai) return;
+    const lines: string[] = [
+      `RedFlag Scanner`,
+      `Рейтинг: ${ai.rating}/100`,
+      `Вердикт: ${ai.short_verdict}`,
+      ``,
+      `Коротко:`,
+      ai.teaser,
+    ];
+
+    if (isPaid) {
+      lines.push('', 'Полный разбор:', ai.full_analysis, '', 'Совет:', ai.advice);
+    }
+
+    try {
+      await copyToClipboard(lines.join('\n'));
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'success',
+        title: 'Результат скопирован',
+      });
+    } catch {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Не удалось скопировать',
+        message: 'Попробуй ещё раз или скопируй текст вручную.',
+      });
+    }
+  }
+
+  async function handleDownload() {
+    if (!ai) return;
+    const lines: string[] = [
+      `RedFlag Scanner`,
+      `Рейтинг: ${ai.rating}/100`,
+      `Вердикт: ${ai.short_verdict}`,
+      ``,
+      `Коротко:`,
+      ai.teaser,
+    ];
+
+    if (isPaid) {
+      lines.push('', 'Полный разбор:', ai.full_analysis, '', 'Совет:', ai.advice);
+    }
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = `redflag-scan-${scanResult?.id ?? 'result'}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(href);
+
+    showToast({
+      id: crypto.randomUUID(),
+      tone: 'success',
+      title: 'Файл скачан',
+    });
+  }
+
+  async function handleDownloadImage() {
+    const id = scanResult?.shareId;
+    if (!id) return;
+    try {
+      const response = await fetch(`/api/og/scan/${encodeURIComponent(id)}.png`, { cache: 'no-store' });
+      if (!response.ok) throw new Error('fetch_failed');
+      const pngBlob = await response.blob();
+      const href = URL.createObjectURL(pngBlob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = `redflag-scan-${id}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(href);
+
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'success',
+        title: 'Картинка скачана',
+      });
+    } catch {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Не удалось скачать картинку',
+        message: 'Попробуй ещё раз чуть позже.',
+      });
+    }
+  }
+
+  async function handleDownloadPdf() {
+    const id = scanResult?.shareId;
+    if (!id) return;
+    try {
+      const response = await fetch(`/api/scan/public/${encodeURIComponent(id)}.pdf`, { cache: 'no-store' });
+      if (!response.ok) throw new Error('fetch_failed');
+      const pdfBlob = await response.blob();
+      const href = URL.createObjectURL(pdfBlob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = `redflag-scan-${id}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(href);
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'success',
+        title: 'PDF скачан',
+      });
+    } catch {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Не удалось скачать PDF',
+        message: 'Попробуй ещё раз чуть позже.',
+      });
+    }
+  }
+
+  async function handleAsk() {
+    const id = scanResult?.id;
+    const q = askQuestion.trim();
+    if (!id || !q) return;
+    if (isAsking) return;
+
+    if (!authUser) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Нужна авторизация',
+        message: 'Войди, чтобы задавать вопросы по отчёту.',
+      });
+      return;
+    }
+
+    try {
+      setIsAsking(true);
+      setAskAnswer('');
+      await ensureCsrfToken();
+      const response = await axios.post<{ answer: string }>(`/api/scan/${encodeURIComponent(id)}/ask`, { question: q });
+      const answer = typeof response.data?.answer === 'string' ? response.data.answer.trim() : '';
+      if (!answer) throw new Error('empty_answer');
+      setAskAnswer(answer);
+      reachGoal('ask_success');
+    } catch {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Не удалось получить ответ',
+        message: 'Проверь сервер и попробуй ещё раз.',
+      });
+    } finally {
+      setIsAsking(false);
+    }
+  }
+
+  async function handleDeleteScan() {
+    const id = scanResult?.id;
+    if (!id) return;
+
+    if (!authUser) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Нужна авторизация',
+        message: 'Войди, чтобы удалять свои отчёты.',
+      });
+      setDeleteConfirmOpen(false);
+      return;
+    }
+
+    try {
+      await ensureCsrfToken();
+      await axios.delete(`/api/scan/${encodeURIComponent(id)}`);
+      setScanResult(null);
+      setIsPaid(false);
+      resetUrlParams(['shareId', 'payment', 'analysisId']);
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'success',
+        title: 'Скан удалён',
+      });
+    } catch {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Не удалось удалить',
+        message: 'Попробуй ещё раз чуть позже.',
+      });
+    } finally {
+      setDeleteConfirmOpen(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <Helmet>
@@ -696,6 +1487,13 @@ export default function App() {
       </Helmet>
       <Toast toast={toast} onClose={() => setToast(null)} />
       <ThankYouModal open={thankYouOpen} onClose={() => setThankYouOpen(false)} />
+      <DeleteConfirmModal
+        open={deleteConfirmOpen}
+        onClose={() => setDeleteConfirmOpen(false)}
+        onConfirm={() => {
+          void handleDeleteScan();
+        }}
+      />
       <div className="pointer-events-none fixed inset-0">
         <div className="absolute inset-0 bg-[radial-gradient(900px_520px_at_10%_10%,rgba(244,63,94,0.22),transparent_60%)]" />
         <div className="absolute inset-0 bg-[radial-gradient(900px_520px_at_90%_18%,rgba(217,70,239,0.18),transparent_60%)]" />
@@ -759,6 +1557,80 @@ export default function App() {
               }}
             />
             <div className="grid gap-4">
+              {authUser ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3">
+                  <div className="text-sm font-semibold text-white/85">
+                    Вошёл(а) как <span className="font-black text-white">{authUser.email}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleLogout();
+                    }}
+                    disabled={isAuthBusy}
+                    className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-xs font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Выйти
+                  </button>
+                </div>
+              ) : (
+                <div className="grid gap-3 rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Авторизация</div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setAuthMode('login')}
+                        className={[
+                          'rounded-xl px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition',
+                          authMode === 'login' ? 'bg-white/10 text-white' : 'bg-transparent text-white/60 hover:bg-white/5',
+                        ].join(' ')}
+                      >
+                        Вход
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAuthMode('register')}
+                        className={[
+                          'rounded-xl px-3 py-2 text-xs font-black uppercase tracking-[0.14em] transition',
+                          authMode === 'register' ? 'bg-white/10 text-white' : 'bg-transparent text-white/60 hover:bg-white/5',
+                        ].join(' ')}
+                      >
+                        Регистрация
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <input
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      placeholder="email"
+                      className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
+                      autoComplete="email"
+                    />
+                    <input
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      placeholder="пароль"
+                      type="password"
+                      className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
+                      autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleAuthSubmit();
+                      }}
+                      disabled={isAuthBusy}
+                      className="inline-flex items-center justify-center rounded-xl bg-white/10 px-4 py-3 text-xs font-black uppercase tracking-[0.14em] text-white transition hover:bg-white/15 active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isAuthBusy ? '...' : authMode === 'register' ? 'Создать' : 'Войти'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="relative">
                 <textarea
                   value={text}
@@ -783,7 +1655,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleScan}
-                  disabled={isLoading || isOcrLoading}
+                  disabled={isLoading || isOcrLoading || !authUser}
                   className="pulse-slow neon-shadow inline-flex w-full items-center justify-center gap-3 rounded-2xl bg-gradient-to-r from-red-500 via-rose-500 to-fuchsia-500 px-6 py-5 text-sm font-black uppercase tracking-[0.18em] text-white shadow-[0_0_45px_rgba(244,63,94,0.25)] transition hover:brightness-110 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-60 sm:text-base"
                 >
                   {isLoading ? <Spinner /> : null}
@@ -807,6 +1679,30 @@ export default function App() {
                 </span>
               </label>
 
+              <label className="flex items-start gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/85">
+                <input
+                  type="checkbox"
+                  checked={anonymizeEnabled}
+                  onChange={(e) => setAnonymizeEnabled(e.target.checked)}
+                  className="mt-1 h-4 w-4 rounded border-white/20 bg-slate-950/60"
+                />
+                <span className="leading-relaxed">Анонимизировать ссылки, email, телефоны и @профили перед анализом</span>
+              </label>
+
+              <div className="grid gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/85">
+                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Автоудаление отчёта</div>
+                <select
+                  value={retentionPreset}
+                  onChange={(e) => setRetentionPreset(e.target.value as 'default' | '24h' | '7d' | 'off')}
+                  className="w-full rounded-xl border border-white/10 bg-slate-950/75 px-3 py-2 text-sm text-slate-100 outline-none focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
+                >
+                  <option value="default">По умолчанию (настройка сервера)</option>
+                  <option value="24h">Удалить через 24 часа</option>
+                  <option value="7d">Удалить через 7 дней</option>
+                  <option value="off">Не удалять автоматически</option>
+                </select>
+              </div>
+
               <div className="text-center text-xs font-semibold uppercase tracking-[0.22em] text-white/55">
                 Можно просто перетащить скриншот сюда (drag & drop)
               </div>
@@ -814,6 +1710,12 @@ export default function App() {
               {isLoading ? (
                 <div className="text-center text-xs font-semibold uppercase tracking-[0.22em] text-white/70">
                   {loadingLabels[loadingLabelIndex]}
+                </div>
+              ) : null}
+
+              {isScanLoading ? (
+                <div className="text-center text-xs font-semibold uppercase tracking-[0.22em] text-white/70">
+                  Загружаем отчёт по ссылке...
                 </div>
               ) : null}
 
@@ -835,7 +1737,113 @@ export default function App() {
             ) : null}
           </div>
 
-          {scanResult && ai ? <ResultsCard ai={ai} isPaid={isPaid} onPay={handlePayment} /> : null}
+          <div ref={resultsRef} />
+          {scanResult && ai ? (
+            <ResultsCard
+              ai={ai}
+              isPaid={isPaid}
+            autoDeleteAt={scanResult.autoDeleteAt ?? null}
+              onPay={handlePayment}
+              onShare={() => {
+                void handleShare();
+              }}
+              onCopy={() => {
+                void handleCopy();
+              }}
+              onDownload={() => {
+                void handleDownload();
+              }}
+              onDownloadPdf={() => {
+                void handleDownloadPdf();
+              }}
+              onDownloadImage={() => {
+                void handleDownloadImage();
+              }}
+              onDelete={() => setDeleteConfirmOpen(true)}
+            />
+          ) : null}
+
+          {scanResult && ai ? (
+            <div className="mt-6 grid gap-6 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur sm:p-8">
+              <div className="grid gap-2">
+                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Вопрос по отчёту</div>
+                <div className="text-sm leading-relaxed text-white/80">
+                  Спроси, что ответить, где манипуляция, или как поставить границу.
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                <textarea
+                  value={askQuestion}
+                  onChange={(e) => setAskQuestion(e.target.value)}
+                  placeholder="Например: Как лучше ответить на его последнюю фразу?"
+                  className="min-h-[120px] w-full resize-none rounded-2xl border border-white/10 bg-slate-950/75 p-4 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-fuchsia-500/60 focus:ring-4 focus:ring-fuchsia-500/10"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleAsk();
+                  }}
+                  disabled={!askQuestion.trim() || isAsking}
+                  className="inline-flex items-center justify-center gap-3 rounded-2xl bg-white/10 px-6 py-4 text-sm font-black uppercase tracking-[0.14em] text-white transition hover:bg-white/15 active:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isAsking ? <Spinner /> : null}
+                  Ответить
+                </button>
+              </div>
+
+              {askAnswer ? (
+                <div className="rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
+                  <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Ответ</div>
+                  <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-white/90 sm:text-base">{askAnswer}</div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void copyToClipboard(askAnswer);
+                      }}
+                      className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+                    >
+                      Скопировать
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAskQuestion('');
+                        setAskAnswer('');
+                      }}
+                      className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+                    >
+                      Очистить
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {scanResult.text ? (
+                <div className="rounded-3xl border border-white/10 bg-deep-bg/55 p-6">
+                  <div className="text-xs font-semibold uppercase tracking-[0.22em] text-white/60">Переписка</div>
+                  <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-white/90">
+                    {highlightQuotes(
+                      scanResult.text,
+                      ai.flags.map((f) => f.quote).filter(Boolean),
+                    ).map((p, idx) =>
+                      p.kind === 'mark' ? (
+                        <mark
+                          key={idx}
+                          className="rounded bg-fuchsia-500/20 px-1 text-white"
+                        >
+                          {p.value}
+                        </mark>
+                      ) : (
+                        <span key={idx}>{p.value}</span>
+                      ),
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       </div>
 

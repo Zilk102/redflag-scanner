@@ -14,8 +14,13 @@ model Analysis {
   isPaid       Boolean  @default(false)
   consentGiven Boolean  @default(false)
   consentAt    DateTime?
+  autoDeleteAt DateTime?
+  anonymization Json?
+  userId       String?  @db.Uuid
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   createdAt    DateTime @default(now())
 
+  @@index([userId])
   @@map("analyses")
 }
 
@@ -26,7 +31,59 @@ model Scan {
   isPaid    Boolean  @default(false)
   consentGiven Boolean  @default(false)
   consentAt    DateTime?
+  autoDeleteAt DateTime?
+  anonymization Json?
+  shareId    String   @unique
+  isPublic   Boolean  @default(true)
+  userId     String?  @db.Uuid
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   createdAt DateTime @default(now())
 
+  @@index([userId])
   @@map("scans")
+}
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String    @unique
+  passwordHash String
+  createdAt    DateTime  @default(now())
+  sessions     Session[]
+  scans        Scan[]
+  analyses     Analysis[]
+
+  @@map("users")
+}
+
+model Session {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  tokenHash   String   @unique
+  createdAt   DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  ipHash      String?
+  userAgent   String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model PaymentWebhookEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  paymentId    String   @unique
+  event        String
+  payload      Json
+  receivedAt   DateTime @default(now())
+  lastTriedAt  DateTime?
+  attempts     Int      @default(0)
+  processedAt  DateTime?
+  lastError    String?
+
+  @@index([processedAt])
+  @@map("payment_webhook_events")
 }

@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 const DEFAULT_SYSTEM_PROMPT =
-  'Ты — токсичный, но проницательный эксперт по отношениям. Твой стиль: стендап-комик + психолог. Ты используешь сленг (ред флаг, кринж, газлайтинг, душнила). Ты НЕНАВИДИШЬ скучные отношения.\n\nТвоя задача: проанализировать текст переписки и вытащить всю токсичную механику: манипуляции, контроль, обесценивание, газлайтинг, эмоциональные качели, пассивную агрессию, ревность, давление, шантаж, двойные стандарты, вину и стыд.\n\nОтветь ТОЛЬКО валидным JSON-объектом без пояснений, без markdown и без любого дополнительного текста. Строго по схеме:\n{\n  "rating": 0-100,\n  "short_verdict": "Короткая, хлёсткая фраза (до 5 слов) для заголовка.",\n  "teaser": "Интригующее описание проблемы (2 предложения), которое обрывается на самом интересном...",\n  "full_analysis": "Длинный, детальный разбор всех манипуляций (минимум 3 абзаца).",\n  "advice": "Конкретный совет, что делать (бросать/терпеть)."\n}\n\nПравила: rating — целое 0..100 (100 = беги от него, 0 = святой человек). teaser — ровно 2 предложения, второе обрывается и заканчивается на многоточие. full_analysis — минимум 3 абзаца.';
+  'Ты — токсичный, но проницательный эксперт по отношениям. Стиль: стендап-комик + психолог. Сленг допустим (ред флаг, кринж, газлайтинг), но без оскорблений пользователя.\n\nЗадача: проанализировать переписку и найти токсичные паттерны: манипуляции, контроль, обесценивание, газлайтинг, эмоциональные качели, пассивную агрессию, ревность, давление, шантаж, двойные стандарты, вину и стыд.\n\nВерни ТОЛЬКО валидный JSON-объект (без markdown, без пояснений, без префиксов/суффиксов текста). Схема строгая:\n{\n  "rating": 0-100,\n  "short_verdict": "до 5 слов, ударная фраза для заголовка",\n  "teaser": "ровно 2 предложения, второе заканчивается на …",\n  "full_analysis": "минимум 3 абзаца, подробный разбор",\n  "advice": "что делать дальше, конкретно",\n  "flags": [\n    {\n      "category": "строка: категория (например: газлайтинг/контроль/обесценивание)",\n      "severity": 0-100,\n      "quote": "короткая цитата из переписки (дословно)",\n      "explanation": "почему это ред флаг",\n      "what_to_reply": "короткий пример ответа пользователю"\n    }\n  ]\n}\n\nПравила: rating — целое 0..100. teaser — ровно 2 предложения, второе обрывается и заканчивается на … . flags: 3..12 элементов, severity — целое 0..100, quote — максимально дословно. Поля обязательные.';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,6 +20,73 @@ function getAuthHeaderValue() {
   if (cloudApiKey) return `Api-Key ${cloudApiKey}`;
   if (iamToken) return `Bearer ${iamToken}`;
   return null;
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toTrimmedString(value) {
+  if (typeof value !== 'string') return null;
+  const t = value.trim();
+  return t ? t : null;
+}
+
+function toIntInRange(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.round(n);
+  if (i < min || i > max) return null;
+  return i;
+}
+
+function normalizeFlags(flagsRaw) {
+  if (!Array.isArray(flagsRaw)) return [];
+
+  const out = [];
+  for (const item of flagsRaw) {
+    if (!isPlainObject(item)) continue;
+    const category = toTrimmedString(item.category);
+    const severity = toIntInRange(item.severity, 0, 100);
+    const quote = toTrimmedString(item.quote) ?? '';
+    const explanation = toTrimmedString(item.explanation) ?? '';
+    const whatToReply = toTrimmedString(item.what_to_reply) ?? '';
+
+    if (!category || severity === null) continue;
+
+    out.push({
+      category,
+      severity,
+      quote,
+      explanation,
+      what_to_reply: whatToReply,
+    });
+  }
+
+  return out.slice(0, 12);
+}
+
+function normalizeScanVerdict(obj) {
+  if (!isPlainObject(obj)) return null;
+
+  const rating = toIntInRange(obj.rating ?? obj.score, 0, 100);
+  const shortVerdict = toTrimmedString(obj.short_verdict ?? obj.verdict);
+  const teaser = toTrimmedString(obj.teaser);
+  const fullAnalysis = toTrimmedString(obj.full_analysis ?? obj.analysis);
+  const advice = toTrimmedString(obj.advice);
+  const flags = normalizeFlags(obj.flags);
+
+  if (rating === null) return null;
+  if (!shortVerdict || !teaser || !fullAnalysis || !advice) return null;
+
+  return {
+    rating,
+    short_verdict: shortVerdict,
+    teaser,
+    full_analysis: fullAnalysis,
+    advice,
+    flags,
+  };
 }
 
 class YandexGPTService {
@@ -45,91 +112,119 @@ class YandexGPTService {
       typeof options.maxRetries === 'number'
         ? options.maxRetries
         : Number(process.env.YANDEX_GPT_MAX_RETRIES ?? '2');
+
+    this.failureThreshold =
+      typeof options.failureThreshold === 'number'
+        ? options.failureThreshold
+        : Number(process.env.YANDEX_GPT_CB_FAILURES ?? '5');
+    this.openMs =
+      typeof options.openMs === 'number'
+        ? options.openMs
+        : Number(process.env.YANDEX_GPT_CB_OPEN_MS ?? '30000');
+    this.maxConcurrent =
+      typeof options.maxConcurrent === 'number'
+        ? options.maxConcurrent
+        : Number(process.env.YANDEX_GPT_MAX_CONCURRENT ?? '2');
+    this.minIntervalMs =
+      typeof options.minIntervalMs === 'number'
+        ? options.minIntervalMs
+        : Number(process.env.YANDEX_GPT_MIN_INTERVAL_MS ?? '0');
+
+    this._semActive = 0;
+    this._semQueue = [];
+    this._circuitOpenUntil = 0;
+    this._circuitFailures = 0;
+    this._lastRequestAt = 0;
   }
 
   async analyzeText(text) {
-    try {
-      if (!this.folderId) {
-        throw new Error('YANDEX_FOLDER_ID не задан');
-      }
-
-      const authValue = getAuthHeaderValue();
-      if (!authValue) {
-        throw new Error('Не задан YANDEX_API_KEY, YANDEX_CLOUD_API_KEY или YANDEX_IAM_TOKEN');
-      }
-
-      const payload = {
-        modelUri: buildModelUri(this.folderId),
-        completionOptions: {
-          stream: false,
-          temperature: this.temperature,
-          maxTokens: String(this.maxTokens),
-        },
-        messages: [
-          { role: 'system', text: DEFAULT_SYSTEM_PROMPT },
-          { role: 'user', text },
-        ],
-      };
-
-      const headers = {
-        'Content-Type': 'application/json',
-        Authorization: authValue,
-        'x-folder-id': this.folderId,
-        'x-data-logging-enabled': 'false',
-      };
-
-      return await this.#postWithRetry(this.url, payload, headers);
-    } catch (err) {
-      if (process.env.NODE_ENV === 'development') {
-        return {
-          result: {
-            alternatives: [
-              {
-                message: {
-                  role: 'assistant',
-                  text: JSON.stringify({
-                    rating: 50,
-                    short_verdict: 'Сомнительный вайб, но без паники',
-                    teaser:
-                      'YandexGPT сейчас недоступен. Но если бы он был, он бы уже нашёл тут пару странных моментов…',
-                    full_analysis:
-                      'YandexGPT временно недоступен/вернул ошибку.\n\nЭто ответ в режиме разработки, чтобы не ломать UI.\n\nПроверь переменные окружения и доступ к foundationModels API.',
-                    advice:
-                      'Проверь YANDEX_FOLDER_ID и ключ/токен. Если проблема повторяется — скорее бросать, чем терпеть.',
-                  }),
-                },
-                status: 'ALTERNATIVE_STATUS_FINAL',
-              },
-            ],
-          },
-          _mock: true,
-          _error: err?.message ?? String(err),
-        };
-      }
-
-      throw err;
+    if (!this.folderId) {
+      throw new Error('YANDEX_FOLDER_ID не задан');
     }
+
+    const authValue = getAuthHeaderValue();
+    if (!authValue) {
+      throw new Error('Не задан YANDEX_API_KEY, YANDEX_CLOUD_API_KEY или YANDEX_IAM_TOKEN');
+    }
+
+    const payload = {
+      modelUri: buildModelUri(this.folderId),
+      completionOptions: {
+        stream: false,
+        temperature: this.temperature,
+        maxTokens: String(this.maxTokens),
+      },
+      messages: [
+        { role: 'system', text: DEFAULT_SYSTEM_PROMPT },
+        { role: 'user', text },
+      ],
+    };
+
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: authValue,
+      'x-folder-id': this.folderId,
+      'x-data-logging-enabled': 'false',
+    };
+
+    return await this.#postWithRetry(this.url, payload, headers);
   }
 
   async scan(text) {
     const completion = await this.analyzeText(text);
     const aiText = this.#extractAssistantText(completion);
     const parsed = this.#parseJsonObject(aiText);
-    if (parsed) return parsed;
+    const normalized = normalizeScanVerdict(parsed);
+    if (normalized) return normalized;
 
-    if (process.env.NODE_ENV === 'development') {
-      return {
-        rating: 50,
-        short_verdict: 'Модель дала кринж-формат',
-        teaser:
-          'Ответ от YandexGPT пришёл, но формат поплыл. И вот это уже выглядит как ред флаг…',
-        full_analysis:
-          'Ответ от YandexGPT пришёл, но не удалось распарсить JSON.\n\nПроверь промпт/температуру и убедись, что модель отвечает строго JSON.\n\nЕсли в ответе появляется лишний текст, подними строгость инструкции и снизь temperature.',
-        advice: 'Снизь temperature и попроси ответ в одну строку JSON без переносов. Скорее терпеть нельзя, чем можно.',
-      };
+    throw new Error('YandexGPT вернул ответ не по схеме');
+  }
+
+  async askAboutScan({ text, result, question }) {
+    if (!this.folderId) {
+      throw new Error('YANDEX_FOLDER_ID не задан');
     }
 
-    throw new Error('YandexGPT вернул ответ не в формате JSON');
+    const authValue = getAuthHeaderValue();
+    if (!authValue) {
+      throw new Error('Не задан YANDEX_API_KEY, YANDEX_CLOUD_API_KEY или YANDEX_IAM_TOKEN');
+    }
+
+    const system =
+      'Ты — ассистент RedFlag Scanner. Отвечай по делу, коротко и практично.\n\nПравила: верни ТОЛЬКО JSON без markdown и без лишнего текста: {"answer":"..."}. answer — 2-8 предложений, конкретно, без морализаторства.';
+
+    const context =
+      `Переписка:\n${text}\n\nРезультат анализа (JSON):\n${JSON.stringify(result ?? {}, null, 0)}\n\nВопрос пользователя:\n${question}`;
+
+    const payload = {
+      modelUri: buildModelUri(this.folderId),
+      completionOptions: {
+        stream: false,
+        temperature: Math.max(0, Math.min(1, this.temperature)),
+        maxTokens: String(Math.min(Number(this.maxTokens) || 2000, 1200)),
+      },
+      messages: [
+        { role: 'system', text: system },
+        { role: 'user', text: context },
+      ],
+    };
+
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: authValue,
+      'x-folder-id': this.folderId,
+      'x-data-logging-enabled': 'false',
+    };
+
+    const completion = await this.#postWithRetry(this.url, payload, headers);
+    const aiText = this.#extractAssistantText(completion);
+    const parsed = this.#parseJsonObject(aiText);
+    const answer = isPlainObject(parsed) ? toTrimmedString(parsed.answer) : null;
+    if (answer) {
+      return { answer };
+    }
+
+    throw new Error('YandexGPT вернул ответ не по схеме');
   }
 
   #extractAssistantText(completion) {
@@ -222,36 +317,15 @@ class YandexGPTService {
   #tryParseJson(value) {
     try {
       const parsed = JSON.parse(value);
-      if (typeof parsed !== 'object' || parsed === null) return null;
+      if (!isPlainObject(parsed)) return null;
 
-      const ratingValue = parsed.rating ?? parsed.score;
-      const rating = Number(ratingValue);
+      const normalized = normalizeScanVerdict(parsed);
+      if (normalized) return normalized;
 
-      const shortVerdictValue = parsed.short_verdict ?? parsed.verdict;
-      const shortVerdict = typeof shortVerdictValue === 'string' ? shortVerdictValue : null;
+      const answer = toTrimmedString(parsed.answer);
+      if (answer) return { answer };
 
-      const teaserValue = parsed.teaser;
-      const teaser = typeof teaserValue === 'string' ? teaserValue : null;
-
-      const fullAnalysisValue = parsed.full_analysis ?? parsed.analysis;
-      const fullAnalysis = typeof fullAnalysisValue === 'string' ? fullAnalysisValue : null;
-
-      const adviceValue = parsed.advice;
-      const advice = typeof adviceValue === 'string' ? adviceValue : null;
-
-      if (!Number.isFinite(rating)) return null;
-      if (!shortVerdict || !fullAnalysis || !advice) return null;
-
-      const normalizedFull = fullAnalysis.trim();
-      const derivedTeaser = this.#deriveTeaser(normalizedFull);
-
-      return {
-        rating: Math.max(0, Math.min(100, Math.round(rating))),
-        short_verdict: shortVerdict.trim(),
-        teaser: (teaser ?? derivedTeaser).trim(),
-        full_analysis: normalizedFull,
-        advice: advice.trim(),
-      };
+      return null;
     } catch {
       return null;
     }
@@ -278,54 +352,127 @@ class YandexGPTService {
     return `${clipped}…`;
   }
 
-  async #postWithRetry(url, payload, headers) {
-    let lastError;
+  #assertCircuitClosed() {
+    const now = Date.now();
+    const openUntil = Number(this._circuitOpenUntil ?? 0);
+    if (openUntil > now) {
+      const err = new Error('YandexGPT временно недоступен');
+      err.statusCode = 503;
+      throw err;
+    }
+  }
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
-      try {
-        const response = await axios.post(url, payload, {
-          headers,
-          timeout: this.timeoutMs,
-          validateStatus: () => true,
-        });
+  #recordSuccess() {
+    this._circuitFailures = 0;
+    this._circuitOpenUntil = 0;
+  }
 
-        if (response.status >= 200 && response.status < 300) {
-          return response.data;
-        }
+  #recordFailure() {
+    const failures = Number(this._circuitFailures ?? 0) + 1;
+    this._circuitFailures = failures;
 
-        if (response.status === 404 && url.endsWith('.')) {
-          url = url.slice(0, -1);
-          continue;
-        }
+    const threshold = Number(this.failureThreshold ?? 0);
+    const openMs = Number(this.openMs ?? 0);
+    if (threshold > 0 && failures >= threshold && openMs > 0) {
+      this._circuitOpenUntil = Date.now() + openMs;
+    }
+  }
 
-        const retryable =
-          response.status === 429 ||
-          (response.status >= 500 && response.status <= 599);
+  async #acquireSemaphore() {
+    const limit = Number(this.maxConcurrent ?? 1);
+    const safeLimit = Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 1;
 
-        if (!retryable || attempt >= this.maxRetries) {
-          const details =
-            typeof response.data === 'string'
-              ? response.data
-              : JSON.stringify(response.data);
-          throw new Error(`YandexGPT ошибка ${response.status}: ${details}`);
-        }
+    const release = () => {
+      this._semActive = Math.max(0, Number(this._semActive ?? 0) - 1);
+      const next = Array.isArray(this._semQueue) ? this._semQueue.shift() : null;
+      if (typeof next === 'function') next();
+    };
 
-        const backoffMs = 500 * Math.pow(2, attempt);
-        await sleep(backoffMs);
-      } catch (err) {
-        lastError = err;
-
-        const isAxios = Boolean(err?.isAxiosError);
-        if (!isAxios || attempt >= this.maxRetries) {
-          throw err;
-        }
-
-        const backoffMs = 500 * Math.pow(2, attempt);
-        await sleep(backoffMs);
-      }
+    const active = Number(this._semActive ?? 0);
+    if (active < safeLimit) {
+      this._semActive = active + 1;
+      return release;
     }
 
-    throw lastError ?? new Error('Не удалось получить ответ от YandexGPT');
+    await new Promise((resolve) => {
+      if (!Array.isArray(this._semQueue)) this._semQueue = [];
+      this._semQueue.push(resolve);
+    });
+
+    this._semActive = Number(this._semActive ?? 0) + 1;
+    return release;
+  }
+
+  async #throttle() {
+    const min = Number(this.minIntervalMs ?? 0);
+    if (!Number.isFinite(min) || min <= 0) return;
+    const now = Date.now();
+    const last = Number(this._lastRequestAt ?? 0);
+    const waitMs = last > 0 ? last + min - now : 0;
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+    this._lastRequestAt = Date.now();
+  }
+
+  async #postWithRetry(url, payload, headers) {
+    this.#assertCircuitClosed();
+
+    const release = await this.#acquireSemaphore();
+    try {
+      let lastError;
+
+      for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+        this.#assertCircuitClosed();
+        await this.#throttle();
+
+        try {
+          const response = await axios.post(url, payload, {
+            headers,
+            timeout: this.timeoutMs,
+            validateStatus: () => true,
+          });
+
+          if (response.status >= 200 && response.status < 300) {
+            this.#recordSuccess();
+            return response.data;
+          }
+
+          if (response.status === 404 && url.endsWith('.')) {
+            url = url.slice(0, -1);
+            continue;
+          }
+
+          const retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+
+          if (!retryable || attempt >= this.maxRetries) {
+            const details = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+            const e = new Error(`YandexGPT ошибка ${response.status}: ${details}`);
+            e.statusCode = response.status >= 400 && response.status < 600 ? response.status : 502;
+            throw e;
+          }
+
+          const backoffMs = 500 * Math.pow(2, attempt);
+          await sleep(backoffMs);
+        } catch (err) {
+          lastError = err;
+
+          const isAxios = Boolean(err?.isAxiosError);
+          if (!isAxios || attempt >= this.maxRetries) {
+            this.#recordFailure();
+            throw err;
+          }
+
+          const backoffMs = 500 * Math.pow(2, attempt);
+          await sleep(backoffMs);
+        }
+      }
+
+      this.#recordFailure();
+      throw lastError ?? new Error('Не удалось получить ответ от YandexGPT');
+    } finally {
+      release();
+    }
   }
 }
 
