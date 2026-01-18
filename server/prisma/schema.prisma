@@ -23,6 +23,7 @@ model Scan {
   id        String   @id @default(uuid()) @db.Uuid
   text      String
   result    Json
+  isPaid    Boolean  @default(false)
   consentGiven Boolean  @default(false)
   consentAt    DateTime?
   createdAt DateTime @default(now())

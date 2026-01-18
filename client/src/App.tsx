@@ -8,6 +8,7 @@ type ScanResponse = {
   id: string;
   text: string;
   result: unknown;
+  isPaid: boolean;
   createdAt: string;
 };
 
@@ -254,9 +255,12 @@ function ResultsCard({ ai, isPaid, onPay }: { ai: AiVerdict; isPaid: boolean; on
                   reachGoal('click_paywall');
                   onPay();
                 }}
-                className="neon-shadow w-full rounded-2xl bg-neon-red px-6 py-4 text-sm font-black uppercase tracking-wide text-white transition hover:brightness-110 active:brightness-95 sm:text-base"
+                className="neon-shadow inline-flex min-h-[60px] w-full flex-col items-center justify-center gap-1 rounded-2xl bg-neon-red px-6 py-3 text-center text-white transition hover:brightness-110 active:brightness-95"
               >
-                🔓 ОТКРЫТЬ ВСЮ ПРАВДУ ЗА 149₽
+                <span className="text-[13px] font-black uppercase leading-tight tracking-[0.08em] sm:text-base">
+                  ОТКРЫТЬ ПОЛНЫЙ ОТЧЁТ
+                </span>
+                <span className="text-[12px] font-extrabold leading-tight text-white/90 sm:text-sm">149 ₽</span>
               </button>
               <div className="text-xs leading-relaxed text-white/70">Узнай, что он на самом деле имел в виду</div>
             </div>
@@ -409,24 +413,51 @@ export default function App() {
       tone: 'success',
       title: 'Оплата прошла успешно! Открываем отчет...',
     });
-
-    setIsPaid(true);
     setThankYouOpen(true);
 
     const scanId = url.searchParams.get('scanId');
     if (scanId) {
-      axios
-        .get<ScanResponse>(`/api/scan/${encodeURIComponent(scanId)}`)
-        .then((response) => {
+      let cancelled = false;
+      let timeoutId: number | null = null;
+
+      const loadScan = async (attempt: number) => {
+        try {
+          const response = await axios.get<ScanResponse>(`/api/scan/${encodeURIComponent(scanId)}`);
+          if (cancelled) return;
           setScanResult(response.data);
-        })
-        .catch(() => {
+          setIsPaid(Boolean(response.data.isPaid));
+
+          if (!response.data.isPaid && attempt < 12) {
+            timeoutId = window.setTimeout(() => {
+              void loadScan(attempt + 1);
+            }, 1200);
+            return;
+          }
+
+          if (!response.data.isPaid) {
+            showToast({
+              id: crypto.randomUUID(),
+              tone: 'danger',
+              title: 'Оплата ещё подтверждается',
+              message: 'Если отчёт не открылся, подожди минуту и обнови страницу.',
+            });
+          }
+        } catch {
+          if (cancelled) return;
           showToast({
             id: crypto.randomUUID(),
             tone: 'danger',
             title: 'Не удалось загрузить отчёт. Попробуй обновить страницу.',
           });
-        });
+        }
+      };
+
+      void loadScan(0);
+
+      return () => {
+        cancelled = true;
+        if (timeoutId !== null) window.clearTimeout(timeoutId);
+      };
     }
 
     url.searchParams.delete('payment');

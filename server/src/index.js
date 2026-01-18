@@ -93,6 +93,18 @@ function runPrismaMigrateDeploy() {
 
 runPrismaMigrateDeploy();
 
+function redactScanResultForUnpaid(result) {
+  if (typeof result !== 'object' || result === null) return result;
+  const r = result;
+  if (typeof r.full_analysis === 'string') {
+    return {
+      ...r,
+      full_analysis: '',
+    };
+  }
+  return result;
+}
+
 const app = express();
 
 app.set('trust proxy', 1);
@@ -192,6 +204,7 @@ app.post('/api/scan', scanLimiter, async (req, res, next) => {
       data: {
         text,
         result,
+        isPaid: false,
         consentGiven: true,
         consentAt: new Date(),
       },
@@ -200,7 +213,8 @@ app.post('/api/scan', scanLimiter, async (req, res, next) => {
     res.json({
       id: scan.id,
       text: scan.text,
-      result: scan.result,
+      result: redactScanResultForUnpaid(scan.result),
+      isPaid: scan.isPaid,
       createdAt: scan.createdAt,
     });
   } catch (err) {
@@ -274,7 +288,8 @@ app.get('/api/scan/:id', async (req, res, next) => {
     res.json({
       id: scan.id,
       text: scan.text,
-      result: scan.result,
+      result: scan.isPaid ? scan.result : redactScanResultForUnpaid(scan.result),
+      isPaid: scan.isPaid,
       createdAt: scan.createdAt,
     });
   } catch (err) {
@@ -286,6 +301,42 @@ app.post('/api/pay', async (req, res, next) => {
   try {
     const scanId = typeof req.body?.scanId === 'string' ? req.body.scanId.trim() : '';
     const analysisId = typeof req.body?.analysisId === 'string' ? req.body.analysisId.trim() : '';
+
+    if (!scanId && !analysisId) {
+      const err = new Error('Нужно передать scanId или analysisId');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prisma = getPrismaClient();
+
+    if (scanId) {
+      const scan = await prisma.scan.findUnique({ where: { id: scanId } });
+      if (!scan) {
+        const err = new Error('Скан не найден');
+        err.statusCode = 404;
+        throw err;
+      }
+      if (scan.isPaid) {
+        const err = new Error('Этот скан уже оплачен');
+        err.statusCode = 409;
+        throw err;
+      }
+    }
+
+    if (analysisId) {
+      const analysis = await prisma.analysis.findUnique({ where: { id: analysisId } });
+      if (!analysis) {
+        const err = new Error('Анализ не найден');
+        err.statusCode = 404;
+        throw err;
+      }
+      if (analysis.isPaid) {
+        const err = new Error('Этот анализ уже оплачен');
+        err.statusCode = 409;
+        throw err;
+      }
+    }
 
     const idempotenceKey = crypto.randomUUID();
 
@@ -404,22 +455,46 @@ app.post('/api/payment/webhook', async (req, res, next) => {
       return;
     }
 
+    const amountValue = typeof payment?.amount?.value === 'string' ? payment.amount.value : '';
+    const amountCurrency = typeof payment?.amount?.currency === 'string' ? payment.amount.currency : '';
+    if (amountValue !== '149.00' || amountCurrency !== 'RUB') {
+      res.json({ received: true });
+      return;
+    }
+
+    const scanId = typeof payment?.metadata?.scanId === 'string' ? payment.metadata.scanId.trim() : '';
     const analysisId = typeof payment?.metadata?.analysisId === 'string' ? payment.metadata.analysisId.trim() : '';
-    if (!analysisId) {
+
+    if (!scanId && !analysisId) {
       res.json({ received: true });
       return;
     }
 
     const prisma = getPrismaClient();
-    await prisma.analysis.updateMany({
-      where: {
-        id: analysisId,
-        isPaid: false,
-      },
-      data: {
-        isPaid: true,
-      },
-    });
+
+    if (analysisId) {
+      await prisma.analysis.updateMany({
+        where: {
+          id: analysisId,
+          isPaid: false,
+        },
+        data: {
+          isPaid: true,
+        },
+      });
+    }
+
+    if (scanId) {
+      await prisma.scan.updateMany({
+        where: {
+          id: scanId,
+          isPaid: false,
+        },
+        data: {
+          isPaid: true,
+        },
+      });
+    }
 
     res.json({ received: true });
   } catch (err) {
