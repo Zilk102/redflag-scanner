@@ -134,8 +134,14 @@ app.use(express.json({ limit: '2mb' }));
 
 app.post('/api/analyze', async (req, res) => {
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+  const consent = req.body?.consent === true;
   if (!text) {
     res.status(400).json({ error: 'Поле text обязательно' });
+    return;
+  }
+
+  if (!consent) {
+    res.status(400).json({ error: 'Нужно согласие на обработку персональных данных' });
     return;
   }
 
@@ -148,6 +154,8 @@ app.post('/api/analyze', async (req, res) => {
       originalText: text,
       result,
       isPaid: false,
+      consentGiven: true,
+      consentAt: new Date(),
     },
   });
 
@@ -163,8 +171,15 @@ app.post('/api/analyze', async (req, res) => {
 app.post('/api/scan', scanLimiter, async (req, res, next) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    const consent = req.body?.consent === true;
     if (!text) {
       const err = new Error('Поле text обязательно');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!consent) {
+      const err = new Error('Нужно согласие на обработку персональных данных');
       err.statusCode = 400;
       throw err;
     }
@@ -177,6 +192,8 @@ app.post('/api/scan', scanLimiter, async (req, res, next) => {
       data: {
         text,
         result,
+        consentGiven: true,
+        consentAt: new Date(),
       },
     });
 
@@ -187,6 +204,52 @@ app.post('/api/scan', scanLimiter, async (req, res, next) => {
       createdAt: scan.createdAt,
     });
   } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/scan/:id', async (req, res, next) => {
+  try {
+    const id = typeof req.params?.id === 'string' ? req.params.id.trim() : '';
+    if (!id) {
+      const err = new Error('Поле id обязательно');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prisma = getPrismaClient();
+    await prisma.scan.delete({ where: { id } });
+    res.json({ deleted: true });
+  } catch (err) {
+    if (err?.code === 'P2025') {
+      const notFound = new Error('Скан не найден');
+      notFound.statusCode = 404;
+      next(notFound);
+      return;
+    }
+    next(err);
+  }
+});
+
+app.delete('/api/analysis/:id', async (req, res, next) => {
+  try {
+    const id = typeof req.params?.id === 'string' ? req.params.id.trim() : '';
+    if (!id) {
+      const err = new Error('Поле id обязательно');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prisma = getPrismaClient();
+    await prisma.analysis.delete({ where: { id } });
+    res.json({ deleted: true });
+  } catch (err) {
+    if (err?.code === 'P2025') {
+      const notFound = new Error('Анализ не найден');
+      notFound.statusCode = 404;
+      next(notFound);
+      return;
+    }
     next(err);
   }
 });

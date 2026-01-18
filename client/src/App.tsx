@@ -358,6 +358,7 @@ export default function App() {
   const [isPaying, setIsPaying] = useState(false);
   const [isOcrLoading, setIsOcrLoading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
+  const [consentAccepted, setConsentAccepted] = useState(false);
   const [loadingLabelIndex, setLoadingLabelIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
@@ -453,6 +454,16 @@ export default function App() {
     const trimmed = input.trim();
     const shortTextToastTitle = 'Слишком мало данных. Напиши подробнее!';
 
+    if (!consentAccepted) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Нужно согласие на обработку данных',
+        message: 'Поставь галочку под полем ввода, чтобы запустить анализ.',
+      });
+      return;
+    }
+
     if (!trimmed) {
       setError('Вставь переписку в поле, иначе сканировать нечего.');
       showToast({
@@ -481,7 +492,7 @@ export default function App() {
     setIsPaid(false);
 
     try {
-      const response = await axios.post<ScanResponse>('/api/scan', { text: trimmed });
+      const response = await axios.post<ScanResponse>('/api/scan', { text: trimmed, consent: true });
       setScanResult(response.data);
       reachGoal('scan_success');
       showToast({
@@ -550,6 +561,16 @@ export default function App() {
     }
 
     if (isOcrLoading || isLoading) return;
+
+    if (!consentAccepted) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Нужно согласие на обработку данных',
+        message: 'Поставь галочку под полем ввода, чтобы распознать и проанализировать скриншот.',
+      });
+      return;
+    }
 
     try {
       setIsOcrLoading(true);
@@ -743,6 +764,22 @@ export default function App() {
                 </button>
               </div>
 
+              <label className="flex items-start gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/85">
+                <input
+                  type="checkbox"
+                  checked={consentAccepted}
+                  onChange={(e) => setConsentAccepted(e.target.checked)}
+                  className="mt-1 h-4 w-4 rounded border-white/20 bg-slate-950/60"
+                />
+                <span className="leading-relaxed">
+                  Я согласен(на) с{' '}
+                  <a className="underline" href="/privacy.html" target="_blank" rel="noreferrer">
+                    политикой обработки персональных данных
+                  </a>
+                  {' '}и даю согласие на обработку персональных данных для анализа переписки.
+                </span>
+              </label>
+
               <div className="text-center text-xs font-semibold uppercase tracking-[0.22em] text-white/55">
                 Можно просто перетащить скриншот сюда (drag & drop)
               </div>
@@ -774,6 +811,18 @@ export default function App() {
           {scanResult && ai ? <ResultsCard ai={ai} isPaid={isPaid} onPay={handlePayment} /> : null}
         </section>
       </div>
+
+      <footer className="relative mx-auto w-full max-w-5xl px-4 pb-10 text-xs text-white/55">
+        <div className="mt-10 rounded-3xl border border-white/10 bg-white/5 p-5 backdrop-blur">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <a href="/privacy.html" target="_blank" rel="noreferrer" className="underline">Политика ПДн (152-ФЗ)</a>
+            <a href="/offer.html" target="_blank" rel="noreferrer" className="underline">Публичная оферта</a>
+          </div>
+          <div className="mt-3">
+            Самозанятый: [ФИО исполнителя] · ИНН: [ИНН исполнителя]
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
