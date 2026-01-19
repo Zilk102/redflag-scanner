@@ -1748,9 +1748,9 @@ function renderOgSvg({ rating, shortVerdict, teaser }) {
     </g>
 
     <g transform="translate(80 260)">
-      <text x="0" y="0" fill="#ffffff" font-size="92" font-weight="900">${rating}</text>
-      <text x="168" y="-12" fill="#94a3b8" font-size="24" font-weight="800" letter-spacing="4">/ 100</text>
-      <text x="0" y="64" fill="#94a3b8" font-size="18" font-weight="800" letter-spacing="6">РЕЙТИНГ</text>
+      <text x="0" y="92" fill="#ffffff" font-size="92" font-weight="900">${rating}</text>
+      <text x="168" y="80" fill="#94a3b8" font-size="24" font-weight="800" letter-spacing="4">/ 100</text>
+      <text x="0" y="132" fill="#94a3b8" font-size="18" font-weight="800" letter-spacing="6">РЕЙТИНГ</text>
     </g>
 
     <g transform="translate(80 390)">
