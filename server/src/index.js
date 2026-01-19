@@ -2626,12 +2626,13 @@ function renderShareCardSvg({ shareUrl, verdict, result }) {
 
   const chipX = rightX;
   const chipW = rightW;
-  const chipH = 58;
-  const chipGap = 14;
-  const chipsY = cardY + 300;
+  const chipH = 52;
+  const chipGap = 12;
 
   const titleY = cardY + 106;
   const subtitleY = titleY + titleLines.length * 54 + 14;
+  const signalsTitleY = subtitleY + subtitleLines.length * 30 + 18;
+  const chipsY = signalsTitleY + 26;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
@@ -2712,7 +2713,7 @@ function renderShareCardSvg({ shareUrl, verdict, result }) {
         })}
       </g>
 
-      <g transform="translate(${rightX} ${cardY + 260})">
+      <g transform="translate(${rightX} ${signalsTitleY})">
         <text x="0" y="0" fill="#94a3b8" font-size="13" font-weight="950" letter-spacing="6">КЛЮЧЕВЫЕ СИГНАЛЫ</text>
       </g>
 
