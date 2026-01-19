@@ -15,86 +15,26 @@ const path = require('path');
 const { getPrismaClient } = require('./prismaClient');
 const { YandexGPTService } = require('./services/YandexGPTService');
 
-function getYooKassaCredentials() {
-  const shopId = typeof process.env.YOOKASSA_SHOP_ID === 'string' ? process.env.YOOKASSA_SHOP_ID.trim() : '';
-  const secretKey = typeof process.env.YOOKASSA_SECRET_KEY === 'string' ? process.env.YOOKASSA_SECRET_KEY.trim() : '';
+const FULL_ANALYSIS_PRICE_RUB = '149.00';
 
-  if (!shopId) {
-    const err = new Error('YOOKASSA_SHOP_ID не задан');
-    err.statusCode = 500;
-    throw err;
-  }
-
-  if (!secretKey) {
-    const err = new Error('YOOKASSA_SECRET_KEY не задан');
-    err.statusCode = 500;
-    throw err;
-  }
-
-  return { shopId, secretKey };
+function md5Upper(value) {
+  return crypto.createHash('md5').update(String(value), 'utf8').digest('hex').toUpperCase();
 }
 
-function getYooKassaAuthorizationHeader() {
-  const { shopId, secretKey } = getYooKassaCredentials();
-  const token = Buffer.from(`${shopId}:${secretKey}`, 'utf8').toString('base64');
-  return `Basic ${token}`;
-}
+function getPaymentReturnUrl() {
+  const url = typeof process.env.PAYMENT_RETURN_URL === 'string' ? process.env.PAYMENT_RETURN_URL.trim() : '';
+  if (url) return url;
+  const legacy = typeof process.env.YOOKASSA_RETURN_URL === 'string' ? process.env.YOOKASSA_RETURN_URL.trim() : '';
+  if (legacy) return legacy;
 
-async function yooKassaRequest({ method, path, idempotenceKey, data }) {
-  const baseUrl = 'https://api.yookassa.ru/v3';
-  const url = `${baseUrl}${path}`;
-
-  const headers = {
-    Authorization: getYooKassaAuthorizationHeader(),
-    'Content-Type': 'application/json',
-  };
-  if (typeof idempotenceKey === 'string' && idempotenceKey.trim()) {
-    headers['Idempotence-Key'] = idempotenceKey.trim();
-  }
-
-  const response = await axios.request({
-    method,
-    url,
-    headers,
-    data,
-    timeout: 15000,
-    validateStatus: () => true,
-  });
-
-  const status = Number(response?.status ?? 0);
-  if (status >= 200 && status < 300) return response.data;
-
-  const err = new Error('Ошибка YooKassa');
-  err.statusCode = status >= 400 && status < 600 ? status : 502;
-  throw err;
-}
-
-async function yooKassaCreatePayment({ payload, idempotenceKey }) {
-  return await yooKassaRequest({ method: 'post', path: '/payments', idempotenceKey, data: payload });
-}
-
-async function yooKassaGetPayment(paymentId) {
-  const id = typeof paymentId === 'string' ? paymentId.trim() : '';
-  if (!id) {
-    const err = new Error('Не удалось определить paymentId');
-    err.statusCode = 400;
-    throw err;
-  }
-  return await yooKassaRequest({ method: 'get', path: `/payments/${encodeURIComponent(id)}` });
-}
-
-function getYooKassaReturnUrl() {
-  const returnUrl = process.env.YOOKASSA_RETURN_URL;
-  if (returnUrl) return returnUrl;
-
-  const err = new Error('YOOKASSA_RETURN_URL не задан');
+  const err = new Error('PAYMENT_RETURN_URL не задан');
   err.statusCode = 500;
   throw err;
 }
 
-function buildYooKassaReturnUrl(extraParams = {}) {
+function buildPaymentReturnUrl(extraParams = {}) {
   try {
-    const url = new URL(getYooKassaReturnUrl());
+    const url = new URL(getPaymentReturnUrl());
 
     url.searchParams.set('payment', 'success');
 
@@ -108,9 +48,245 @@ function buildYooKassaReturnUrl(extraParams = {}) {
 
     return url.toString();
   } catch {
-    const err = new Error('YOOKASSA_RETURN_URL должен быть валидным URL');
+    const err = new Error('PAYMENT_RETURN_URL должен быть валидным URL');
     err.statusCode = 500;
     throw err;
+  }
+}
+
+function getPaymentProvider() {
+  const raw = typeof process.env.PAYMENT_PROVIDER === 'string' ? process.env.PAYMENT_PROVIDER.trim().toLowerCase() : '';
+  if (!raw) return 'yookassa';
+  if (raw === 'yookassa' || raw === 'robokassa') return raw;
+  const err = new Error('PAYMENT_PROVIDER должен быть yookassa или robokassa');
+  err.statusCode = 500;
+  throw err;
+}
+
+function getYooKassaConfig() {
+  const shopId = typeof process.env.YOOKASSA_SHOP_ID === 'string' ? process.env.YOOKASSA_SHOP_ID.trim() : '';
+  const secretKey = typeof process.env.YOOKASSA_SECRET_KEY === 'string' ? process.env.YOOKASSA_SECRET_KEY.trim() : '';
+  const baseUrl =
+    (typeof process.env.YOOKASSA_BASE_URL === 'string' ? process.env.YOOKASSA_BASE_URL.trim() : '') ||
+    'https://api.yookassa.ru/v3';
+
+  if (!shopId) {
+    const err = new Error('YOOKASSA_SHOP_ID не задан');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (!secretKey) {
+    const err = new Error('YOOKASSA_SECRET_KEY не задан');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  try {
+    new URL(baseUrl);
+  } catch {
+    const err = new Error('YOOKASSA_BASE_URL должен быть валидным URL');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  return { shopId, secretKey, baseUrl: baseUrl.replace(/\/+$/, '') };
+}
+
+function normalizeYooKassaAmount(value) {
+  const raw = typeof value === 'string' ? value.trim().replace(',', '.') : String(value ?? '').trim().replace(',', '.');
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || n > 100000000) return '';
+  return n.toFixed(2);
+}
+
+async function yookassaCreatePayment({ amountValue, description, returnUrl, metadata }) {
+  const cfg = getYooKassaConfig();
+  const amount = normalizeYooKassaAmount(amountValue);
+  if (!amount) {
+    const err = new Error('Некорректная сумма');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const idempotenceKey = crypto.randomUUID();
+  const auth = Buffer.from(`${cfg.shopId}:${cfg.secretKey}`, 'utf8').toString('base64');
+  const url = `${cfg.baseUrl}/payments`;
+
+  const payload = {
+    amount: { value: amount, currency: 'RUB' },
+    capture: true,
+    description: String(description ?? ''),
+    confirmation: {
+      type: 'redirect',
+      return_url: String(returnUrl ?? ''),
+    },
+    metadata: isPlainObject(metadata) ? metadata : {},
+  };
+
+  let response;
+  try {
+    response = await axios.post(url, payload, {
+      timeout: 20000,
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Idempotence-Key': idempotenceKey,
+        'Content-Type': 'application/json',
+      },
+      validateStatus: () => true,
+    });
+  } catch {
+    const err = new Error('Не удалось создать платёж в YooKassa');
+    err.statusCode = 502;
+    throw err;
+  }
+
+  if (!response || response.status < 200 || response.status >= 300) {
+    const err = new Error('YooKassa вернула ошибку при создании платежа');
+    err.statusCode = 502;
+    throw err;
+  }
+
+  const data = response.data;
+  const paymentId = typeof data?.id === 'string' ? data.id : '';
+  const confirmationUrl = typeof data?.confirmation?.confirmation_url === 'string' ? data.confirmation.confirmation_url : '';
+
+  if (!paymentId || !confirmationUrl) {
+    const err = new Error('YooKassa вернула неожиданный ответ');
+    err.statusCode = 502;
+    throw err;
+  }
+
+  return { paymentId, confirmationUrl };
+}
+
+function getRobokassaConfig() {
+  const merchantLogin = typeof process.env.ROBOKASSA_MERCHANT_LOGIN === 'string' ? process.env.ROBOKASSA_MERCHANT_LOGIN.trim() : '';
+  const password1 = typeof process.env.ROBOKASSA_PASSWORD_1 === 'string' ? process.env.ROBOKASSA_PASSWORD_1.trim() : '';
+  const password2 = typeof process.env.ROBOKASSA_PASSWORD_2 === 'string' ? process.env.ROBOKASSA_PASSWORD_2.trim() : '';
+  const isTest = toBoolean(process.env.ROBOKASSA_TEST_MODE) ?? false;
+  const baseUrl =
+    (typeof process.env.ROBOKASSA_BASE_URL === 'string' ? process.env.ROBOKASSA_BASE_URL.trim() : '') ||
+    'https://auth.robokassa.ru/Merchant/Index.aspx';
+
+  if (!merchantLogin) {
+    const err = new Error('ROBOKASSA_MERCHANT_LOGIN не задан');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (!password1) {
+    const err = new Error('ROBOKASSA_PASSWORD_1 не задан');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (!password2) {
+    const err = new Error('ROBOKASSA_PASSWORD_2 не задан');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  return { merchantLogin, password1, password2, isTest, baseUrl };
+}
+
+function normalizeRobokassaOutSum(value) {
+  const raw = typeof value === 'string' ? value.trim().replace(',', '.') : String(value ?? '').trim().replace(',', '.');
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || n > 100000000) return '';
+  return n.toFixed(2);
+}
+
+function buildRobokassaSignatureBase({ parts, shpParams }) {
+  const shpEntries = Object.entries(shpParams ?? {})
+    .filter(([, v]) => typeof v === 'string' && v.trim())
+    .map(([k, v]) => [String(k), String(v).trim()]);
+
+  shpEntries.sort(([a], [b]) => a.localeCompare(b, 'en'));
+  const tail = shpEntries.map(([k, v]) => `${k}=${v}`);
+  return parts.concat(tail).join(':');
+}
+
+function buildRobokassaPaymentUrl({ invId, outSum, description, shpParams, email }) {
+  const cfg = getRobokassaConfig();
+  const sum = normalizeRobokassaOutSum(outSum);
+  if (!sum) {
+    const err = new Error('Некорректная сумма');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const signatureBase = buildRobokassaSignatureBase({
+    parts: [cfg.merchantLogin, sum, String(invId), cfg.password1],
+    shpParams,
+  });
+  const signatureValue = md5Upper(signatureBase);
+
+  const url = new URL(cfg.baseUrl);
+  url.searchParams.set('MerchantLogin', cfg.merchantLogin);
+  url.searchParams.set('OutSum', sum);
+  url.searchParams.set('InvId', String(invId));
+  url.searchParams.set('Description', String(description ?? ''));
+  url.searchParams.set('SignatureValue', signatureValue);
+  url.searchParams.set('Culture', 'ru');
+  url.searchParams.set('Encoding', 'utf-8');
+  if (cfg.isTest) url.searchParams.set('IsTest', '1');
+  if (typeof email === 'string' && email.trim()) url.searchParams.set('Email', email.trim());
+
+  if (shpParams && typeof shpParams === 'object') {
+    for (const [k, v] of Object.entries(shpParams)) {
+      if (typeof v === 'string' && v.trim()) {
+        url.searchParams.set(k, v.trim());
+      }
+    }
+  }
+
+  return url.toString();
+}
+
+function verifyRobokassaResultSignature({ outSum, invId, signatureValue, shpParams }) {
+  const cfg = getRobokassaConfig();
+  const sum = normalizeRobokassaOutSum(outSum);
+  if (!sum) return false;
+  const got = typeof signatureValue === 'string' ? signatureValue.trim().toUpperCase() : '';
+  if (!got) return false;
+
+  const signatureBase = buildRobokassaSignatureBase({
+    parts: [sum, String(invId), cfg.password2],
+    shpParams,
+  });
+  const expected = md5Upper(signatureBase);
+
+  try {
+    const a = Buffer.from(got, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+function verifyRobokassaSuccessSignature({ outSum, invId, signatureValue, shpParams }) {
+  const cfg = getRobokassaConfig();
+  const sum = normalizeRobokassaOutSum(outSum);
+  if (!sum) return false;
+  const got = typeof signatureValue === 'string' ? signatureValue.trim().toUpperCase() : '';
+  if (!got) return false;
+
+  const signatureBase = buildRobokassaSignatureBase({
+    parts: [sum, String(invId), cfg.password1],
+    shpParams,
+  });
+  const expected = md5Upper(signatureBase);
+
+  try {
+    const a = Buffer.from(got, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
   }
 }
 
@@ -1351,8 +1527,8 @@ function isIpInCidr(ip, cidr) {
 }
 
 function verifyWebhookRequest(req) {
-  const expectedToken = typeof process.env.YOOKASSA_WEBHOOK_TOKEN === 'string' ? process.env.YOOKASSA_WEBHOOK_TOKEN.trim() : '';
-  const allowedCidrs = parseAllowedCidrs(process.env.YOOKASSA_WEBHOOK_ALLOWED_CIDRS);
+  const expectedToken = typeof process.env.PAYMENT_WEBHOOK_TOKEN === 'string' ? process.env.PAYMENT_WEBHOOK_TOKEN.trim() : '';
+  const allowedCidrs = parseAllowedCidrs(process.env.PAYMENT_WEBHOOK_ALLOWED_CIDRS);
 
   if (expectedToken) {
     const tokenFromPath = typeof req.params?.token === 'string' ? req.params.token.trim() : '';
@@ -3868,42 +4044,115 @@ app.post('/api/pay', requireAuth(requireCsrf(async (req, res) => {
       throw err;
     }
   }
+  const now = new Date();
+  const description = 'Оплата полного разбора';
+  const returnUrl = buildPaymentReturnUrl({
+    scanId,
+    analysisId,
+    shareId: scanForPay?.shareId ? String(scanForPay.shareId) : undefined,
+  });
 
-    const idempotenceKey = crypto.randomUUID();
+  const provider = getPaymentProvider();
 
-    const metadata = {};
-    if (scanId) metadata.scanId = scanId;
-    if (analysisId) metadata.analysisId = analysisId;
+  if (provider === 'robokassa') {
+    let invId = null;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const candidate = crypto.randomInt(1, 2147483647);
+      const paymentId = `robokassa:${candidate}`;
+      try {
+        await prisma.paymentWebhookEvent.create({
+          data: {
+            paymentId,
+            event: 'payment.created',
+            payload: {
+              provider: 'robokassa',
+              invId: candidate,
+              outSum: FULL_ANALYSIS_PRICE_RUB,
+              scanId: scanId || null,
+              analysisId: analysisId || null,
+              userId: req.auth.userId,
+              returnUrl,
+            },
+            lastTriedAt: now,
+            attempts: 0,
+          },
+        });
+        invId = candidate;
+        break;
+      } catch {
+        continue;
+      }
+    }
 
-    const payment = await yooKassaCreatePayment({
-      payload: {
-        amount: {
-          value: '149.00',
-          currency: 'RUB',
-        },
-        confirmation: {
-          type: 'redirect',
-          return_url: buildYooKassaReturnUrl({
-            scanId,
-            analysisId,
-            shareId: scanForPay?.shareId ? String(scanForPay.shareId) : undefined,
-          }),
-        },
-        capture: true,
-        description: 'Оплата полного разбора',
-        metadata,
-      },
-      idempotenceKey,
-    });
-
-    const confirmationUrl = payment?.confirmation?.confirmation_url;
-    if (typeof confirmationUrl !== 'string' || !confirmationUrl) {
-      const err = new Error('ЮKassa не вернула ссылку на оплату');
+    if (!invId) {
+      const err = new Error('Не удалось создать счёт для оплаты');
       err.statusCode = 502;
       throw err;
     }
 
-  res.json({ confirmation_url: confirmationUrl });
+    const shpParams = {
+      Shp_scanId: scanId || '',
+      Shp_analysisId: analysisId || '',
+      Shp_shareId: scanForPay?.shareId ? String(scanForPay.shareId) : '',
+      Shp_userId: String(req.auth.userId),
+    };
+    const confirmationUrl = buildRobokassaPaymentUrl({
+      invId,
+      outSum: FULL_ANALYSIS_PRICE_RUB,
+      description,
+      shpParams,
+    });
+
+    res.json({ confirmation_url: confirmationUrl });
+    return;
+  }
+
+  const yk = await yookassaCreatePayment({
+    amountValue: FULL_ANALYSIS_PRICE_RUB,
+    description,
+    returnUrl,
+    metadata: {
+      scanId: scanId || null,
+      analysisId: analysisId || null,
+      shareId: scanForPay?.shareId ? String(scanForPay.shareId) : null,
+      userId: String(req.auth.userId),
+    },
+  });
+
+  const paymentId = `yookassa:${yk.paymentId}`;
+  await prisma.paymentWebhookEvent.upsert({
+    where: { paymentId },
+    create: {
+      paymentId,
+      event: 'payment.created',
+      payload: {
+        provider: 'yookassa',
+        yookassaPaymentId: yk.paymentId,
+        outSum: FULL_ANALYSIS_PRICE_RUB,
+        scanId: scanId || null,
+        analysisId: analysisId || null,
+        userId: req.auth.userId,
+        returnUrl,
+      },
+      lastTriedAt: now,
+      attempts: 0,
+    },
+    update: {
+      event: 'payment.created',
+      payload: {
+        provider: 'yookassa',
+        yookassaPaymentId: yk.paymentId,
+        outSum: FULL_ANALYSIS_PRICE_RUB,
+        scanId: scanId || null,
+        analysisId: analysisId || null,
+        userId: req.auth.userId,
+        returnUrl,
+      },
+      lastTriedAt: now,
+    },
+  });
+
+  res.json({ confirmation_url: yk.confirmationUrl });
 })));
 
 app.post(
@@ -3929,113 +4178,171 @@ app.post(
       err.statusCode = 409;
       throw err;
     }
+    const now = new Date();
+    const description = 'Оплата полного разбора';
+    const returnUrl = buildPaymentReturnUrl({ analysisId });
 
-    const idempotenceKey = crypto.randomUUID();
+    const provider = getPaymentProvider();
 
-    const payment = await yooKassaCreatePayment({
-      payload: {
-        amount: {
-          value: '149.00',
-          currency: 'RUB',
-        },
-        confirmation: {
-          type: 'redirect',
-          return_url: buildYooKassaReturnUrl({ analysisId }),
-        },
-        capture: true,
-        description: 'Оплата полного разбора',
-        metadata: {
-          analysisId,
-        },
-      },
-      idempotenceKey,
-    });
+    if (provider === 'robokassa') {
+      let invId = null;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const candidate = crypto.randomInt(1, 2147483647);
+        const paymentId = `robokassa:${candidate}`;
+        try {
+          await prisma.paymentWebhookEvent.create({
+            data: {
+              paymentId,
+              event: 'payment.created',
+              payload: {
+                provider: 'robokassa',
+                invId: candidate,
+                outSum: FULL_ANALYSIS_PRICE_RUB,
+                analysisId,
+                userId: req.auth.userId,
+                returnUrl,
+              },
+              lastTriedAt: now,
+              attempts: 0,
+            },
+          });
+          invId = candidate;
+          break;
+        } catch {
+          continue;
+        }
+      }
 
-    const confirmationUrl = payment?.confirmation?.confirmation_url;
-    if (typeof confirmationUrl !== 'string' || !confirmationUrl) {
-      const err = new Error('ЮKassa не вернула ссылку на оплату');
-      err.statusCode = 502;
-      throw err;
-    }
+      if (!invId) {
+        const err = new Error('Не удалось создать счёт для оплаты');
+        err.statusCode = 502;
+        throw err;
+      }
 
-    res.json({ confirmationUrl, confirmation_url: confirmationUrl });
-  })),
-);
+      const shpParams = {
+        Shp_analysisId: analysisId,
+        Shp_userId: String(req.auth.userId),
+      };
+      const confirmationUrl = buildRobokassaPaymentUrl({
+        invId,
+        outSum: FULL_ANALYSIS_PRICE_RUB,
+        description,
+        shpParams,
+      });
 
-const paymentWebhookHandler = async (req, res, next) => {
-  try {
-    verifyWebhookRequest(req);
-
-    const event = typeof req.body?.event === 'string' ? req.body.event : '';
-    const object = typeof req.body?.object === 'object' && req.body.object !== null ? req.body.object : null;
-
-    if (event !== 'payment.succeeded') {
-      res.json({ received: true });
+      res.json({ confirmationUrl, confirmation_url: confirmationUrl });
       return;
     }
 
-    const paymentId = typeof object?.id === 'string' ? object.id : '';
-    if (!paymentId) {
-      const err = new Error('Не удалось определить paymentId');
+    const yk = await yookassaCreatePayment({
+      amountValue: FULL_ANALYSIS_PRICE_RUB,
+      description,
+      returnUrl,
+      metadata: {
+        analysisId,
+        userId: String(req.auth.userId),
+      },
+    });
+
+    const paymentId = `yookassa:${yk.paymentId}`;
+    await prisma.paymentWebhookEvent.upsert({
+      where: { paymentId },
+      create: {
+        paymentId,
+        event: 'payment.created',
+        payload: {
+          provider: 'yookassa',
+          yookassaPaymentId: yk.paymentId,
+          outSum: FULL_ANALYSIS_PRICE_RUB,
+          analysisId,
+          userId: req.auth.userId,
+          returnUrl,
+        },
+        lastTriedAt: now,
+        attempts: 0,
+      },
+      update: {
+        event: 'payment.created',
+        payload: {
+          provider: 'yookassa',
+          yookassaPaymentId: yk.paymentId,
+          outSum: FULL_ANALYSIS_PRICE_RUB,
+          analysisId,
+          userId: req.auth.userId,
+          returnUrl,
+        },
+        lastTriedAt: now,
+      },
+    });
+
+    res.json({ confirmationUrl: yk.confirmationUrl, confirmation_url: yk.confirmationUrl });
+  })),
+);
+
+const yookassaWebhookHandler = async (req, res, next) => {
+  try {
+    verifyWebhookRequest(req);
+
+    const payload = typeof req.body === 'object' && req.body !== null ? req.body : {};
+    const event = typeof payload.event === 'string' ? payload.event : '';
+    const obj = typeof payload.object === 'object' && payload.object !== null ? payload.object : {};
+    const paymentIdRaw = typeof obj.id === 'string' ? obj.id.trim() : '';
+
+    if (!paymentIdRaw) {
+      const err = new Error('Webhook: не удалось определить payment id');
       err.statusCode = 400;
       throw err;
     }
 
+    const status = typeof obj.status === 'string' ? obj.status : '';
+    if (event && event !== 'payment.succeeded' && status !== 'succeeded') {
+      res.json({ ok: true });
+      return;
+    }
+
+    const amountValue = typeof obj.amount?.value === 'string' ? obj.amount.value : '';
+    const normalizedSum = normalizeYooKassaAmount(amountValue);
+    if (!normalizedSum || normalizedSum !== FULL_ANALYSIS_PRICE_RUB) {
+      const err = new Error('Webhook: неподходящая сумма');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const metadata = typeof obj.metadata === 'object' && obj.metadata !== null ? obj.metadata : {};
+    const scanId = typeof metadata.scanId === 'string' ? metadata.scanId.trim() : '';
+    const analysisId = typeof metadata.analysisId === 'string' ? metadata.analysisId.trim() : '';
+
     const prisma = getPrismaClient();
     const now = new Date();
+    const paymentId = `yookassa:${paymentIdRaw}`;
     const webhook = await prisma.paymentWebhookEvent.upsert({
       where: { paymentId },
       create: {
         paymentId,
-        event,
-        payload: req.body ?? {},
+        event: 'payment.succeeded',
+        payload,
         lastTriedAt: now,
         attempts: 1,
       },
       update: {
-        event,
-        payload: req.body ?? {},
+        event: 'payment.succeeded',
+        payload,
         lastTriedAt: now,
         attempts: { increment: 1 },
       },
     });
 
     if (webhook?.processedAt) {
-      res.json({ received: true });
+      res.json({ ok: true });
       return;
     }
-
-    const payment = await yooKassaGetPayment(paymentId);
-
-    if (payment?.status !== 'succeeded' || payment?.paid !== true) {
-      await prisma.paymentWebhookEvent.update({
-        where: { paymentId },
-        data: { lastError: 'payment_not_succeeded' },
-      });
-      res.json({ received: true });
-      return;
-    }
-
-    const amountValue = typeof payment?.amount?.value === 'string' ? payment.amount.value : '';
-    const amountCurrency = typeof payment?.amount?.currency === 'string' ? payment.amount.currency : '';
-    if (amountValue !== '149.00' || amountCurrency !== 'RUB') {
-      await prisma.paymentWebhookEvent.update({
-        where: { paymentId },
-        data: { lastError: 'amount_mismatch' },
-      });
-      res.json({ received: true });
-      return;
-    }
-
-    const scanId = typeof payment?.metadata?.scanId === 'string' ? payment.metadata.scanId.trim() : '';
-    const analysisId = typeof payment?.metadata?.analysisId === 'string' ? payment.metadata.analysisId.trim() : '';
 
     if (!scanId && !analysisId) {
       await prisma.paymentWebhookEvent.update({
         where: { paymentId },
         data: { processedAt: new Date(), lastError: 'missing_metadata' },
       });
-      res.json({ received: true });
+      res.json({ ok: true });
       return;
     }
 
@@ -4068,15 +4375,189 @@ const paymentWebhookHandler = async (req, res, next) => {
       data: { processedAt: new Date(), lastError: null },
     });
 
-    res.json({ received: true });
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
 };
 
-app.post('/api/payment/webhook', webhookLimiter, paymentWebhookHandler);
+const robokassaResultHandler = async (req, res, next) => {
+  try {
+    verifyWebhookRequest(req);
 
-app.post('/api/payment/webhook/:token', webhookLimiter, paymentWebhookHandler);
+    const payload = {
+      ...(typeof req.query === 'object' && req.query !== null ? req.query : {}),
+      ...(typeof req.body === 'object' && req.body !== null ? req.body : {}),
+    };
+
+    const outSum = typeof payload.OutSum === 'string' ? payload.OutSum : typeof payload.outSum === 'string' ? payload.outSum : '';
+    const invId = typeof payload.InvId === 'string' ? payload.InvId : typeof payload.invId === 'string' ? payload.invId : '';
+    const signatureValue = typeof payload.SignatureValue === 'string' ? payload.SignatureValue : '';
+
+    const scanId = typeof payload.Shp_scanId === 'string' ? payload.Shp_scanId.trim() : '';
+    const analysisId = typeof payload.Shp_analysisId === 'string' ? payload.Shp_analysisId.trim() : '';
+
+    const invIdNum = /^\d+$/.test(invId) ? Number(invId) : NaN;
+
+    if (!Number.isFinite(invIdNum) || invIdNum < 0) {
+      const err = new Error('Не удалось определить InvId');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!verifyRobokassaResultSignature({
+      outSum,
+      invId: invIdNum,
+      signatureValue,
+      shpParams: {
+        Shp_analysisId: analysisId || '',
+        Shp_scanId: scanId || '',
+        Shp_shareId: typeof payload.Shp_shareId === 'string' ? payload.Shp_shareId : '',
+        Shp_userId: typeof payload.Shp_userId === 'string' ? payload.Shp_userId : '',
+      },
+    })) {
+      const err = new Error('Webhook: неверная подпись');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const normalizedSum = normalizeRobokassaOutSum(outSum);
+    if (!normalizedSum || normalizedSum !== FULL_ANALYSIS_PRICE_RUB) {
+      const err = new Error('Webhook: неподходящая сумма');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prisma = getPrismaClient();
+    const now = new Date();
+    const paymentId = `robokassa:${invIdNum}`;
+    const webhook = await prisma.paymentWebhookEvent.upsert({
+      where: { paymentId },
+      create: {
+        paymentId,
+        event: 'payment.succeeded',
+        payload,
+        lastTriedAt: now,
+        attempts: 1,
+      },
+      update: {
+        event: 'payment.succeeded',
+        payload,
+        lastTriedAt: now,
+        attempts: { increment: 1 },
+      },
+    });
+
+    if (webhook?.processedAt) {
+      res.type('text/plain').send(`OK${invIdNum}`);
+      return;
+    }
+
+    if (!scanId && !analysisId) {
+      await prisma.paymentWebhookEvent.update({
+        where: { paymentId },
+        data: { processedAt: new Date(), lastError: 'missing_shp' },
+      });
+      res.type('text/plain').send(`OK${invIdNum}`);
+      return;
+    }
+
+    if (analysisId) {
+      await prisma.analysis.updateMany({
+        where: {
+          id: analysisId,
+          isPaid: false,
+        },
+        data: {
+          isPaid: true,
+        },
+      });
+    }
+
+    if (scanId) {
+      await prisma.scan.updateMany({
+        where: {
+          id: scanId,
+          isPaid: false,
+        },
+        data: {
+          isPaid: true,
+        },
+      });
+    }
+
+    await prisma.paymentWebhookEvent.update({
+      where: { paymentId },
+      data: { processedAt: new Date(), lastError: null },
+    });
+
+    res.type('text/plain').send(`OK${invIdNum}`);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const yookassaWebhookMiddleware = [webhookLimiter, yookassaWebhookHandler];
+
+app.post('/api/payment/webhook', ...yookassaWebhookMiddleware);
+app.post('/api/payment/webhook/:token', ...yookassaWebhookMiddleware);
+app.post('/api/payment/webhook/yookassa', ...yookassaWebhookMiddleware);
+app.post('/api/payment/webhook/yookassa/:token', ...yookassaWebhookMiddleware);
+
+const robokassaWebhookMiddleware = [express.urlencoded({ extended: false }), webhookLimiter, robokassaResultHandler];
+
+app.get('/api/payment/webhook/robokassa', ...robokassaWebhookMiddleware);
+app.post('/api/payment/webhook/robokassa', ...robokassaWebhookMiddleware);
+app.get('/api/payment/webhook/robokassa/:token', ...robokassaWebhookMiddleware);
+app.post('/api/payment/webhook/robokassa/:token', ...robokassaWebhookMiddleware);
+
+app.get('/api/payment/robokassa/success', async (req, res, next) => {
+  try {
+    const q = typeof req.query === 'object' && req.query !== null ? req.query : {};
+    const outSum = typeof q.OutSum === 'string' ? q.OutSum : '';
+    const invId = typeof q.InvId === 'string' ? q.InvId : '';
+    const signatureValue = typeof q.SignatureValue === 'string' ? q.SignatureValue : '';
+    const scanId = typeof q.Shp_scanId === 'string' ? q.Shp_scanId.trim() : '';
+    const analysisId = typeof q.Shp_analysisId === 'string' ? q.Shp_analysisId.trim() : '';
+    const shareId = typeof q.Shp_shareId === 'string' ? q.Shp_shareId.trim() : '';
+
+    const invIdNum = /^\d+$/.test(invId) ? Number(invId) : NaN;
+    if (!Number.isFinite(invIdNum) || invIdNum < 0) {
+      const err = new Error('Не удалось определить InvId');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!verifyRobokassaSuccessSignature({
+      outSum,
+      invId: invIdNum,
+      signatureValue,
+      shpParams: {
+        Shp_analysisId: analysisId || '',
+        Shp_scanId: scanId || '',
+        Shp_shareId: shareId || '',
+        Shp_userId: typeof q.Shp_userId === 'string' ? q.Shp_userId : '',
+      },
+    })) {
+      const err = new Error('Redirect: неверная подпись');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const redirectUrl = buildPaymentReturnUrl({
+      scanId: scanId || undefined,
+      analysisId: analysisId || undefined,
+      shareId: shareId || undefined,
+    });
+    res.redirect(302, redirectUrl);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/payment/robokassa/fail', (_req, res) => {
+  res.redirect(302, getPaymentReturnUrl());
+});
 
 app.use((err, _req, res, _next) => {
   const statusCode = Number(err?.statusCode ?? 500);
