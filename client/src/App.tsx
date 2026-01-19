@@ -974,6 +974,144 @@ export default function App() {
   const telegramBot = useMemo(() => normalizeTelegramBotUsername(telegramBotUsernameRaw), [telegramBotUsernameRaw]);
 
   const ai = useMemo(() => parseAiVerdict(scanResult?.result), [scanResult]);
+  const seo = useMemo(() => {
+    const originFromEnvRaw = (import.meta.env as { VITE_PUBLIC_ORIGIN?: string }).VITE_PUBLIC_ORIGIN ?? '';
+    const originFromEnv = originFromEnvRaw.trim().replace(/\/+$/, '');
+    const origin = typeof window === 'undefined' ? originFromEnv : window.location.origin;
+
+    const defaultTitle = 'RedFlag Scanner — Проверь переписку на токсичность';
+    const defaultDescription =
+      'Нейросеть ищет красные флаги, манипуляции и газлайтинг в твоих чатах. Узнай правду о бывшем.';
+    const defaultOgTitle = 'Твой бывший — абьюзер? Проверь нейросетью.';
+    const defaultOgDescription = 'Загрузи скрин переписки и получи честный психоразбор.';
+
+    const shareId = typeof scanResult?.shareId === 'string' ? scanResult.shareId : '';
+    const hasPublicShare = Boolean(shareId && scanResult?.isPublic === true);
+    const canonicalPath = hasPublicShare ? `/r/${encodeURIComponent(shareId)}` : '/';
+    const canonical = origin ? `${origin}${canonicalPath}` : canonicalPath;
+    const ogImage = hasPublicShare
+      ? `/api/og/scan/${encodeURIComponent(shareId)}.png?p=${scanResult?.isPaid ? '1' : '0'}`
+      : '/api/og/landing.png';
+
+    const makeAbsolute = (value: string) => {
+      if (!origin) return undefined;
+      if (/^https?:\/\//i.test(value)) return value;
+      if (!value.startsWith('/')) return `${origin}/${value}`;
+      return `${origin}${value}`;
+    };
+
+    const baseGraph = [
+      {
+        '@type': 'WebSite',
+        name: 'RedFlag Scanner',
+        url: origin ? `${origin}/` : undefined,
+        inLanguage: 'ru',
+      },
+      {
+        '@type': 'Organization',
+        name: 'RedFlag Scanner',
+        url: origin ? `${origin}/` : undefined,
+      },
+    ];
+
+    if (ai) {
+      const verdictTitle = ai.short_verdict.trim();
+      const title = verdictTitle ? `RedFlag Scanner — ${verdictTitle}` : defaultTitle;
+      const description = `Рейтинг: ${ai.rating}/100. ${ai.teaser}`.trim();
+
+      const schema = {
+        '@context': 'https://schema.org',
+        '@graph': [
+          ...baseGraph,
+          {
+            '@type': 'WebPage',
+            name: title,
+            description,
+            url: origin ? canonical : undefined,
+            inLanguage: 'ru',
+            primaryImageOfPage: makeAbsolute(ogImage)
+              ? { '@type': 'ImageObject', url: makeAbsolute(ogImage) }
+              : undefined,
+          },
+        ],
+      };
+
+      return {
+        title,
+        description,
+        canonical,
+        ogTitle: title,
+        ogDescription: description,
+        ogImage,
+        schemaJson: JSON.stringify(schema).replaceAll('</', '<\\/'),
+      };
+    }
+
+    const schema = {
+      '@context': 'https://schema.org',
+      '@graph': [
+        ...baseGraph,
+        {
+          '@type': 'WebPage',
+          name: defaultTitle,
+          description: defaultDescription,
+          url: origin ? canonical : undefined,
+          inLanguage: 'ru',
+          primaryImageOfPage: makeAbsolute(ogImage)
+            ? { '@type': 'ImageObject', url: makeAbsolute(ogImage) }
+            : undefined,
+        },
+        {
+          '@type': 'FAQPage',
+          inLanguage: 'ru',
+          mainEntity: [
+            {
+              '@type': 'Question',
+              name: 'Что делает RedFlag Scanner?',
+              acceptedAnswer: {
+                '@type': 'Answer',
+                text: 'Сервис анализирует переписку и помогает найти токсичные паттерны: манипуляции, газлайтинг и давление.',
+              },
+            },
+            {
+              '@type': 'Question',
+              name: 'Нужно ли загружать скриншоты на сервер?',
+              acceptedAnswer: {
+                '@type': 'Answer',
+                text: 'Нет. Скриншоты распознаются в браузере, а на анализ отправляется только полученный текст.',
+              },
+            },
+            {
+              '@type': 'Question',
+              name: 'Как делиться результатом?',
+              acceptedAnswer: {
+                '@type': 'Answer',
+                text: 'Можно включить публичную ссылку на отчёт. Для неё формируется превью-карточка для мессенджеров и соцсетей.',
+              },
+            },
+            {
+              '@type': 'Question',
+              name: 'Сохраняется ли текст переписки?',
+              acceptedAnswer: {
+                '@type': 'Answer',
+                text: 'Текст может сохраняться как часть отчёта для доступа по ссылке и управления отчётами. Отчёт можно удалить в интерфейсе.',
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    return {
+      title: defaultTitle,
+      description: defaultDescription,
+      canonical,
+      ogTitle: defaultOgTitle,
+      ogDescription: defaultOgDescription,
+      ogImage,
+      schemaJson: JSON.stringify(schema).replaceAll('</', '<\\/'),
+    };
+  }, [ai, scanResult]);
   const loadingLabels = useMemo(
     () => ['Анализируем токсичность...', 'Ищем красные флаги...', 'Связываемся с базой бывших...'],
     [],
@@ -1712,21 +1850,24 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <Helmet>
-        <title>RedFlag Scanner — Проверь переписку на токсичность</title>
+        <title>{seo.title}</title>
+        <link rel="canonical" href={seo.canonical} />
         <meta
-          name="description"
-          content="Нейросеть ищет красные флаги, манипуляции и газлайтинг в твоих чатах. Узнай правду о бывшем."
+          name="robots"
+          content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
         />
-        <meta property="og:title" content="Твой бывший — абьюзер? Проверь нейросетью." />
-        <meta
-          property="og:description"
-          content="Загрузи скрин переписки и получи честный психоразбор."
-        />
-        <meta
-          property="og:image"
-          content="https://placehold.co/1200x630/1a1a40/FF2A6D?text=RED+FLAG+SCANNER"
-        />
+        <meta name="description" content={seo.description} />
+        <meta property="og:title" content={seo.ogTitle} />
+        <meta property="og:description" content={seo.ogDescription} />
+        <meta property="og:url" content={seo.canonical} />
+        <meta property="og:image" content={seo.ogImage} />
         <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="RedFlag Scanner" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content={seo.ogTitle} />
+        <meta name="twitter:description" content={seo.ogDescription} />
+        <meta name="twitter:image" content={seo.ogImage} />
+        <script type="application/ld+json">{seo.schemaJson}</script>
       </Helmet>
       <Toast toast={toast} onClose={() => setToast(null)} />
       <ThankYouModal open={thankYouOpen} onClose={() => setThankYouOpen(false)} />

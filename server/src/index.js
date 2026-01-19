@@ -2020,6 +2020,66 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
+app.get('/robots.txt', async (req, res) => {
+  const baseUrl = getBaseUrl(req);
+  const body = `User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /*?shareId=
+Disallow: /*&shareId=
+Disallow: /*?analysisId=
+Disallow: /*&analysisId=
+Disallow: /*?payment=
+Disallow: /*&payment=
+
+Sitemap: ${baseUrl}/sitemap.xml
+`;
+
+  res
+    .status(200)
+    .setHeader('Cache-Control', 'public, max-age=3600')
+    .type('text/plain; charset=utf-8')
+    .send(body);
+});
+
+app.get('/sitemap.xml', async (req, res) => {
+  const baseUrl = getBaseUrl(req);
+  const today = new Date().toISOString().slice(0, 10);
+  const urls = [
+    { loc: `${baseUrl}/`, changefreq: 'daily', priority: '1.0' },
+    { loc: `${baseUrl}/lp`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/toxic-relationship`, changefreq: 'weekly', priority: '0.8' },
+    { loc: `${baseUrl}/lp/gaslighting`, changefreq: 'weekly', priority: '0.8' },
+    { loc: `${baseUrl}/lp/manipulation`, changefreq: 'weekly', priority: '0.8' },
+    { loc: `${baseUrl}/lp/red-flags`, changefreq: 'weekly', priority: '0.8' },
+    { loc: `${baseUrl}/lp/abuser-check`, changefreq: 'weekly', priority: '0.8' },
+    { loc: `${baseUrl}/lp/control`, changefreq: 'weekly', priority: '0.8' },
+    { loc: `${baseUrl}/lp/silent-treatment`, changefreq: 'weekly', priority: '0.8' },
+    { loc: `${baseUrl}/lp/boundaries`, changefreq: 'weekly', priority: '0.7' },
+  ];
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls
+  .map(
+    (item) => `  <url>
+    <loc>${escapeXml(item.loc)}</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>${escapeXml(item.changefreq)}</changefreq>
+    <priority>${escapeXml(item.priority)}</priority>
+  </url>`,
+  )
+  .join('\n')}
+</urlset>
+`;
+
+  res
+    .status(200)
+    .setHeader('Cache-Control', 'public, max-age=3600')
+    .type('application/xml; charset=utf-8')
+    .send(xml);
+});
+
 function execFileAsync(command, args, options) {
   return new Promise((resolve, reject) => {
     execFile(command, args, options, (error, stdout, stderr) => {
@@ -2386,10 +2446,19 @@ app.get('/r/:token', async (req, res) => {
   const baseUrl = getBaseUrl(req);
   const shareUrl = `${baseUrl}/r/${encodeURIComponent(scan.shareId)}`;
   const openUrl = `${baseUrl}/?shareId=${encodeURIComponent(scan.shareId)}`;
-  const ogImage = `${baseUrl}/api/og/scan/${encodeURIComponent(scan.shareId)}.svg?p=${scan.isPaid ? '1' : '0'}`;
+  const ogImage = `${baseUrl}/api/og/scan/${encodeURIComponent(scan.shareId)}.png?p=${scan.isPaid ? '1' : '0'}`;
 
   const title = `RedFlag Scanner — ${verdict.short_verdict}`;
   const description = `Рейтинг: ${verdict.rating}/100. ${verdict.teaser}`;
+  const schemaJson = JSON.stringify({
+    '@context': 'https://schema.org',
+    '@type': 'WebPage',
+    name: title,
+    description,
+    url: shareUrl,
+    inLanguage: 'ru',
+    primaryImageOfPage: { '@type': 'ImageObject', url: ogImage },
+  }).replaceAll('</', '<\\/');
 
   res
     .status(200)
@@ -2413,6 +2482,8 @@ app.get('/r/:token', async (req, res) => {
     <meta name="twitter:title" content="${escapeHtml(title)}" />
     <meta name="twitter:description" content="${escapeHtml(description)}" />
     <meta name="twitter:image" content="${escapeHtml(ogImage)}" />
+
+    <script type="application/ld+json">${schemaJson}</script>
   </head>
   <body style="margin:0;background:#020617;color:#e2e8f0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial">
     <main style="max-width:920px;margin:0 auto;padding:48px 20px;display:grid;gap:18px">
@@ -2435,6 +2506,123 @@ app.get('/r/:token', async (req, res) => {
     </script>
   </body>
 </html>`);
+});
+
+app.get('/api/og/landing.svg', async (_req, res) => {
+  const svg = renderOgSvg({
+    rating: 86,
+    shortVerdict: 'Проверь переписку на токсичность',
+    teaser: 'Нейросеть находит красные флаги, манипуляции и газлайтинг в чатах.',
+  });
+
+  res
+    .status(200)
+    .setHeader('Content-Type', 'image/svg+xml; charset=utf-8')
+    .setHeader('Cache-Control', 'public, max-age=3600')
+    .send(svg);
+});
+
+app.get('/api/og/landing.png', async (_req, res) => {
+  const svg = renderOgSvg({
+    rating: 86,
+    shortVerdict: 'Проверь переписку на токсичность',
+    teaser: 'Нейросеть находит красные флаги, манипуляции и газлайтинг в чатах.',
+  });
+
+  const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: 1200 } });
+  const png = resvg.render().asPng();
+
+  res
+    .status(200)
+    .setHeader('Content-Type', 'image/png')
+    .setHeader('Cache-Control', 'public, max-age=3600')
+    .send(png);
+});
+
+function getLpOgData(slug) {
+  const s = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
+  const map = {
+    lp: {
+      rating: 72,
+      shortVerdict: 'Проверь переписку на красные флаги',
+      teaser: 'Гайды: газлайтинг, манипуляции, контроль, игнор и границы.',
+    },
+    'red-flags': {
+      rating: 86,
+      shortVerdict: 'Красные флаги в отношениях',
+      teaser: 'Чеклист по переписке и быстрый анализ риска.',
+    },
+    gaslighting: {
+      rating: 86,
+      shortVerdict: 'Газлайтинг в переписке',
+      teaser: 'Примеры фраз и признаки: «тебе показалось», «ты придумал(а)».',
+    },
+    manipulation: {
+      rating: 86,
+      shortVerdict: 'Манипуляции в переписке',
+      teaser: 'Ультиматумы, давление, игнор как наказание и шантаж.',
+    },
+    control: {
+      rating: 78,
+      shortVerdict: 'Контроль и ревность',
+      teaser: 'Проверки, запреты и требования отчёта — где начинается токсичность.',
+    },
+    'silent-treatment': {
+      rating: 78,
+      shortVerdict: 'Игнор как наказание',
+      teaser: 'Когда молчание используют как давление — это красный флаг.',
+    },
+    boundaries: {
+      rating: 64,
+      shortVerdict: 'Границы в переписке',
+      teaser: 'Короткие формулировки, чтобы остановить давление без оправданий.',
+    },
+    'toxic-relationship': {
+      rating: 86,
+      shortVerdict: 'Токсичные отношения',
+      teaser: 'Обесценивание, контроль, шантаж: признаки в сообщениях.',
+    },
+    'abuser-check': {
+      rating: 86,
+      shortVerdict: 'Абьюзер ли он(а)?',
+      teaser: 'Маркеры риска в переписке и почему «случайность» становится системой.',
+    },
+  };
+
+  return map[s] ?? null;
+}
+
+app.get('/api/og/lp/:slug.svg', async (req, res) => {
+  const data = getLpOgData(req.params?.slug);
+  if (!data) {
+    res.status(404).type('text/plain; charset=utf-8').send('Not found');
+    return;
+  }
+
+  const svg = renderOgSvg(data);
+  res
+    .status(200)
+    .setHeader('Content-Type', 'image/svg+xml; charset=utf-8')
+    .setHeader('Cache-Control', 'public, max-age=3600')
+    .send(svg);
+});
+
+app.get('/api/og/lp/:slug.png', async (req, res) => {
+  const data = getLpOgData(req.params?.slug);
+  if (!data) {
+    res.status(404).type('text/plain; charset=utf-8').send('Not found');
+    return;
+  }
+
+  const svg = renderOgSvg(data);
+  const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: 1200 } });
+  const png = resvg.render().asPng();
+
+  res
+    .status(200)
+    .setHeader('Content-Type', 'image/png')
+    .setHeader('Cache-Control', 'public, max-age=3600')
+    .send(png);
 });
 
 app.get('/api/og/scan/:token.svg', async (req, res, next) => {
