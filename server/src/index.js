@@ -1289,17 +1289,8 @@ function isIpInCidr(ip, cidr) {
 }
 
 function verifyWebhookRequest(req) {
-  const shopId = typeof process.env.YOOKASSA_SHOP_ID === 'string' ? process.env.YOOKASSA_SHOP_ID.trim() : '';
-  const secretKey = typeof process.env.YOOKASSA_SECRET_KEY === 'string' ? process.env.YOOKASSA_SECRET_KEY.trim() : '';
-
   const expectedToken = typeof process.env.YOOKASSA_WEBHOOK_TOKEN === 'string' ? process.env.YOOKASSA_WEBHOOK_TOKEN.trim() : '';
   const allowedCidrs = parseAllowedCidrs(process.env.YOOKASSA_WEBHOOK_ALLOWED_CIDRS);
-
-  if (shopId && secretKey && !expectedToken && allowedCidrs.length === 0) {
-    const err = new Error('Webhook: не задан YOOKASSA_WEBHOOK_TOKEN или YOOKASSA_WEBHOOK_ALLOWED_CIDRS');
-    err.statusCode = 500;
-    throw err;
-  }
 
   if (expectedToken) {
     const tokenFromPath = typeof req.params?.token === 'string' ? req.params.token.trim() : '';
@@ -1724,6 +1715,13 @@ const defaultLimiter = rateLimit({
   limit: 100,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    const p = typeof req?.path === 'string' ? req.path : '';
+    if (p === '/api/health') return true;
+    if (p === '/api/auth/csrf') return true;
+    if (p.startsWith('/api/payment/webhook')) return true;
+    return false;
+  },
   handler: (_req, res) => {
     res.status(429).json({ error: 'Слишком много запросов. Попробуй позже.' });
   },

@@ -1092,10 +1092,12 @@ export default function App() {
 
           const shouldPoll = options?.pollUntilPaid === true;
           if (shouldPoll && !response.data.isPaid) {
-            if (attempt < 12) {
+            const maxAttempts = 60;
+            if (attempt < maxAttempts) {
+              const delayMs = attempt < 10 ? 1200 : attempt < 20 ? 2500 : 5000;
               timeoutId = window.setTimeout(() => {
                 void load(attempt + 1);
-              }, 1200);
+              }, delayMs);
             } else {
               showToast({
                 id: crypto.randomUUID(),
