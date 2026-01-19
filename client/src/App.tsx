@@ -977,7 +977,10 @@ export default function App() {
   const seo = useMemo(() => {
     const originFromEnvRaw = (import.meta.env as { VITE_PUBLIC_ORIGIN?: string }).VITE_PUBLIC_ORIGIN ?? '';
     const originFromEnv = originFromEnvRaw.trim().replace(/\/+$/, '');
-    const origin = typeof window === 'undefined' ? originFromEnv : window.location.origin;
+    const origin =
+      typeof window === 'undefined'
+        ? originFromEnv || (import.meta.env.PROD ? 'https://toxiscan.ru' : '')
+        : window.location.origin;
 
     const defaultTitle = 'RedFlag Scanner — Проверь переписку на токсичность';
     const defaultDescription =
@@ -989,7 +992,7 @@ export default function App() {
     const hasPublicShare = Boolean(shareId && scanResult?.isPublic === true);
     const canonicalPath = hasPublicShare ? `/r/${encodeURIComponent(shareId)}` : '/';
     const canonical = origin ? `${origin}${canonicalPath}` : canonicalPath;
-    const ogImage = hasPublicShare
+    const ogImagePath = hasPublicShare
       ? `/api/og/scan/${encodeURIComponent(shareId)}.png?p=${scanResult?.isPaid ? '1' : '0'}`
       : '/api/og/landing.png';
 
@@ -999,6 +1002,8 @@ export default function App() {
       if (!value.startsWith('/')) return `${origin}/${value}`;
       return `${origin}${value}`;
     };
+
+    const ogImage = makeAbsolute(ogImagePath) ?? ogImagePath;
 
     const baseGraph = [
       {
