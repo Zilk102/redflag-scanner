@@ -2452,15 +2452,45 @@ function sanitizePdfLine(value) {
 }
 
 function registerPdfFonts(doc) {
-  const regularPath =
-    (typeof process.env.PDF_FONT_REGULAR === 'string' ? process.env.PDF_FONT_REGULAR.trim() : '') ||
-    '/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf';
-  const boldPath =
-    (typeof process.env.PDF_FONT_BOLD === 'string' ? process.env.PDF_FONT_BOLD.trim() : '') ||
-    '/usr/share/fonts/ttf-dejavu/DejaVuSans-Bold.ttf';
+  const envRegular = typeof process.env.PDF_FONT_REGULAR === 'string' ? process.env.PDF_FONT_REGULAR.trim() : '';
+  const envBold = typeof process.env.PDF_FONT_BOLD === 'string' ? process.env.PDF_FONT_BOLD.trim() : '';
 
-  const hasRegular = regularPath && fs.existsSync(regularPath);
-  const hasBold = boldPath && fs.existsSync(boldPath);
+  function firstExisting(paths) {
+    for (const p of paths) {
+      if (typeof p !== 'string') continue;
+      const s = p.trim();
+      if (!s) continue;
+      if (fs.existsSync(s)) return s;
+    }
+    return '';
+  }
+
+  function fcMatchFile(pattern) {
+    try {
+      const out = execSync(`fc-match -f "%{file}" "${pattern}"`, { encoding: 'utf8' });
+      const file = String(out || '').trim();
+      if (file && fs.existsSync(file)) return file;
+    } catch {
+      return '';
+    }
+    return '';
+  }
+
+  const regularPath =
+    firstExisting([
+      envRegular,
+      '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+      '/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf',
+    ]) || fcMatchFile('DejaVu Sans');
+  const boldPath =
+    firstExisting([
+      envBold,
+      '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
+      '/usr/share/fonts/ttf-dejavu/DejaVuSans-Bold.ttf',
+    ]) || fcMatchFile('DejaVu Sans:style=Bold');
+
+  const hasRegular = Boolean(regularPath);
+  const hasBold = Boolean(boldPath);
 
   if (hasRegular) doc.registerFont('ui', regularPath);
   if (hasBold) doc.registerFont('ui-bold', boldPath);
@@ -2469,6 +2499,143 @@ function registerPdfFonts(doc) {
     regular: hasRegular ? 'ui' : 'Helvetica',
     bold: hasBold ? 'ui-bold' : 'Helvetica-Bold',
   };
+}
+
+function splitTextToSvgLines(text, maxCharsPerLine) {
+  const raw = typeof text === 'string' ? text : '';
+  const normalized = raw.replace(/\r\n?/g, '\n').replace(/\u0000/g, '');
+  const paragraphs = normalized.split('\n');
+  const out = [];
+
+  for (const p of paragraphs) {
+    const words = p.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) {
+      out.push('');
+      continue;
+    }
+    let line = '';
+    for (const w of words) {
+      if (!line) {
+        line = w;
+        continue;
+      }
+      if (line.length + 1 + w.length <= maxCharsPerLine) {
+        line = `${line} ${w}`;
+        continue;
+      }
+      out.push(line);
+      line = w;
+    }
+    if (line) out.push(line);
+  }
+
+  while (out.length > 0 && out[out.length - 1] === '') out.pop();
+  return out;
+}
+
+function renderShareCardSvg({ shareUrl, verdict, result }) {
+  const width = 1200;
+  const height = 630;
+  const rating = Number.isFinite(Number(verdict?.rating)) ? Math.max(0, Math.min(100, Math.round(Number(verdict.rating)))) : 50;
+  const palette = pickOgPalette(rating);
+
+  const family = 'DejaVu Sans,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial';
+  const title = escapeXml(String(verdict?.short_verdict || ''));
+  const teaser = String(verdict?.teaser || '').trim();
+  const subtitle = escapeXml(teaser.length > 170 ? `${teaser.slice(0, 169).trim()}…` : teaser);
+  const label = escapeXml(palette.label);
+  const safeShare = escapeXml(String(shareUrl || ''));
+
+  const flags = extractFlagLines(result).slice(0, 3);
+  const flagLines = flags
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+    .map((x) => (x.length > 88 ? `${x.slice(0, 87).trim()}…` : x));
+
+  const lines = [];
+  for (let i = 0; i < flagLines.length; i += 1) {
+    const y = 456 + i * 44;
+    const txt = escapeXml(flagLines[i]);
+    lines.push(`<text x="108" y="${y}" fill="#e2e8f0" font-size="20" font-weight="650">• ${txt}</text>`);
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#020617" />
+      <stop offset="1" stop-color="#0b1226" />
+    </linearGradient>
+    <radialGradient id="glow" cx="26%" cy="18%" r="70%">
+      <stop offset="0" stop-color="${palette.accent}" stop-opacity="0.30" />
+      <stop offset="1" stop-color="${palette.accent}" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="glow2" cx="86%" cy="26%" r="70%">
+      <stop offset="0" stop-color="${palette.accent2}" stop-opacity="0.24" />
+      <stop offset="1" stop-color="${palette.accent2}" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="chip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="${palette.accent}" />
+      <stop offset="1" stop-color="${palette.accent2}" />
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1226" stop-opacity="0.75" />
+      <stop offset="1" stop-color="#0b1226" stop-opacity="0.35" />
+    </linearGradient>
+  </defs>
+
+  <rect width="${width}" height="${height}" fill="url(#bg)" />
+  <rect width="${width}" height="${height}" fill="url(#glow)" />
+  <rect width="${width}" height="${height}" fill="url(#glow2)" />
+
+  <g font-family="${family}">
+    <g opacity="0.15">
+      <path d="M0 76 H1200" stroke="#e2e8f0" stroke-width="1" />
+      <path d="M0 156 H1200" stroke="#e2e8f0" stroke-width="1" />
+      <path d="M0 236 H1200" stroke="#e2e8f0" stroke-width="1" />
+      <path d="M0 316 H1200" stroke="#e2e8f0" stroke-width="1" />
+      <path d="M0 396 H1200" stroke="#e2e8f0" stroke-width="1" />
+      <path d="M0 476 H1200" stroke="#e2e8f0" stroke-width="1" />
+      <path d="M0 556 H1200" stroke="#e2e8f0" stroke-width="1" />
+    </g>
+
+    <g transform="translate(70 62)">
+      <text x="0" y="0" fill="#e2e8f0" font-size="26" font-weight="900" letter-spacing="6">REDFLAG SCANNER</text>
+      <text x="0" y="32" fill="#94a3b8" font-size="14" font-weight="700">${safeShare}</text>
+    </g>
+
+    <g transform="translate(70 120)">
+      <rect x="0" y="0" width="1060" height="420" rx="28" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.10" />
+      <rect x="0" y="0" width="1060" height="6" rx="3" fill="url(#chip)" />
+
+      <g transform="translate(38 46)">
+        <rect x="0" y="0" width="230" height="52" rx="26" fill="url(#chip)" fill-opacity="0.16" stroke="url(#chip)" stroke-opacity="0.45" />
+        <text x="115" y="35" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="900" letter-spacing="4">${label}</text>
+      </g>
+
+      <g transform="translate(38 138)">
+        <text x="0" y="0" fill="#ffffff" font-size="92" font-weight="900">${rating}</text>
+        <text x="168" y="-12" fill="#94a3b8" font-size="24" font-weight="800" letter-spacing="4">/ 100</text>
+        <text x="0" y="64" fill="#94a3b8" font-size="16" font-weight="900" letter-spacing="6">РЕЙТИНГ</text>
+      </g>
+
+      <g transform="translate(360 154)">
+        <text x="0" y="0" fill="#ffffff" font-size="52" font-weight="950">${title}</text>
+        <text x="0" y="56" fill="#cbd5e1" font-size="24" font-weight="650">${subtitle}</text>
+      </g>
+
+      <g transform="translate(38 326)">
+        <text x="0" y="0" fill="#94a3b8" font-size="16" font-weight="900" letter-spacing="6">ТОП СИГНАЛЫ</text>
+      </g>
+
+      ${lines.join('\n      ')}
+    </g>
+
+    <g transform="translate(70 584)">
+      <text x="0" y="0" fill="#94a3b8" font-size="18" font-weight="700">Поделись: картинка доступна только после оплаты</text>
+    </g>
+  </g>
+</svg>`;
 }
 
 function writePdfSection(doc, title, body, fonts) {
@@ -2513,6 +2680,246 @@ function extractFlagLines(result) {
   return out.slice(0, 40);
 }
 
+function parseHexColor(hex) {
+  const raw = typeof hex === 'string' ? hex.trim() : '';
+  if (!/^#?[0-9a-fA-F]{6}$/.test(raw)) return null;
+  const clean = raw.startsWith('#') ? raw.slice(1) : raw;
+  const r = Number.parseInt(clean.slice(0, 2), 16);
+  const g = Number.parseInt(clean.slice(2, 4), 16);
+  const b = Number.parseInt(clean.slice(4, 6), 16);
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null;
+  return { r, g, b };
+}
+
+function mixHex(a, b, t) {
+  const ca = parseHexColor(a);
+  const cb = parseHexColor(b);
+  if (!ca || !cb) return '#000000';
+  const k = Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0;
+  const r = Math.round(ca.r + (cb.r - ca.r) * k);
+  const g = Math.round(ca.g + (cb.g - ca.g) * k);
+  const bl = Math.round(ca.b + (cb.b - ca.b) * k);
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${bl.toString(16).padStart(2, '0')}`;
+}
+
+function drawVerticalGradient(doc, x, y, w, h, top, bottom, steps) {
+  const s = Number.isFinite(steps) ? Math.max(8, Math.min(240, Math.trunc(steps))) : 80;
+  const band = h / s;
+  for (let i = 0; i < s; i += 1) {
+    const t = s === 1 ? 0 : i / (s - 1);
+    const c = mixHex(top, bottom, t);
+    doc.rect(x, y + i * band, w, band + 0.6).fill(c);
+  }
+}
+
+function drawPdfCover({ doc, fonts, verdict, shareUrl, safeResult }) {
+  const rating = Number.isFinite(Number(verdict?.rating)) ? Math.max(0, Math.min(100, Math.round(Number(verdict.rating)))) : 50;
+  const palette = pickOgPalette(rating);
+  const w = doc.page.width;
+  const h = doc.page.height;
+  const margin = doc.page.margins.left;
+  const innerW = w - doc.page.margins.left - doc.page.margins.right;
+
+  doc.save();
+  drawVerticalGradient(doc, 0, 0, w, h, '#020617', '#0b1226', 140);
+  doc.restore();
+
+  doc.save();
+  doc.fillOpacity(0.22).fill(palette.accent).circle(w * 0.28, h * 0.18, 220).fill();
+  doc.fillOpacity(0.18).fill(palette.accent2).circle(w * 0.78, h * 0.22, 250).fill();
+  doc.fillOpacity(0.10).fill(palette.accent).circle(w * 0.62, h * 0.78, 280).fill();
+  doc.restore();
+
+  doc.fillColor('#e2e8f0').font(fonts.bold).fontSize(22);
+  doc.text('REDFLAG SCANNER', margin, 76, { width: innerW, characterSpacing: 4 });
+
+  const label = palette.label;
+  const labelW = Math.min(260, Math.max(160, doc.widthOfString(label, { font: fonts.bold, size: 12 }) + 46));
+  const labelX = margin;
+  const labelY = 128;
+  doc.save();
+  doc.fillOpacity(0.18).fill(palette.accent).roundedRect(labelX, labelY, labelW, 42, 21).fill();
+  doc.fillOpacity(0.45).stroke(palette.accent2).lineWidth(1.2).roundedRect(labelX, labelY, labelW, 42, 21).stroke();
+  doc.restore();
+  doc.fillColor('#ffffff').font(fonts.bold).fontSize(12);
+  doc.text(label, labelX, labelY + 14, { width: labelW, align: 'center', characterSpacing: 3 });
+
+  doc.fillColor('#ffffff').font(fonts.bold).fontSize(92);
+  doc.text(String(rating), margin, 208, { width: innerW, align: 'left' });
+  doc.fillColor('#94a3b8').font(fonts.bold).fontSize(24);
+  doc.text('/ 100', margin + 165, 216, { width: 140, align: 'left', characterSpacing: 2 });
+  doc.fillColor('#94a3b8').font(fonts.bold).fontSize(14);
+  doc.text('РЕЙТИНГ', margin, 300, { width: 240, align: 'left', characterSpacing: 4 });
+
+  doc.fillColor('#ffffff').font(fonts.bold).fontSize(36);
+  doc.text(String(verdict?.short_verdict || '').trim(), margin, 338, { width: innerW, lineGap: 2 });
+  doc.moveDown(0.6);
+  doc.fillColor('#cbd5e1').font(fonts.regular).fontSize(16);
+  doc.text(String(verdict?.teaser || '').trim(), { width: innerW, lineGap: 3 });
+
+  const topFlags = extractFlagLines(safeResult).slice(0, 3);
+  if (Array.isArray(topFlags) && topFlags.length > 0) {
+    doc.moveDown(1.2);
+    doc.fillColor('#94a3b8').font(fonts.bold).fontSize(12);
+    doc.text('ТОП СИГНАЛЫ', margin, doc.y, { width: innerW, characterSpacing: 4 });
+    doc.moveDown(0.6);
+    doc.fillColor('#e2e8f0').font(fonts.regular).fontSize(12);
+    for (const line of topFlags) {
+      const t = String(line || '').trim();
+      if (!t) continue;
+      doc.text(`• ${t}`, { width: innerW, lineGap: 2 });
+    }
+  }
+
+  doc.fillColor('#94a3b8').font(fonts.regular).fontSize(10);
+  doc.text(String(shareUrl || ''), margin, h - 72, { width: innerW });
+
+  doc.addPage();
+  return { palette, rating };
+}
+
+function ensureSpace(doc, neededHeight) {
+  const bottom = doc.page.height - doc.page.margins.bottom;
+  const y = doc.y;
+  if (y + neededHeight <= bottom) return;
+  doc.addPage();
+}
+
+function writePdfBoxSection(doc, title, body, fonts, palette) {
+  const t = sanitizePdfLine(title);
+  const b = sanitizePdfLine(body);
+  if (!t || !b) return;
+
+  const x = doc.page.margins.left;
+  const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const pad = 16;
+  const innerW = w - pad * 2;
+
+  doc.font(fonts.bold).fontSize(13);
+  const titleH = doc.heightOfString(t, { width: innerW });
+  doc.font(fonts.regular).fontSize(11);
+  const bodyH = doc.heightOfString(b, { width: innerW, lineGap: 2 });
+  const total = pad + titleH + 10 + bodyH + pad;
+  ensureSpace(doc, total + 14);
+
+  const y = doc.y;
+  doc.save();
+  doc.fillColor('#ffffff').roundedRect(x, y, w, total, 16).fill();
+  doc.strokeColor(palette.accent2).opacity(0.20).lineWidth(1).roundedRect(x, y, w, total, 16).stroke();
+  doc.opacity(1);
+  doc.fillColor(palette.accent).roundedRect(x, y, 6, total, 3).fill();
+  doc.restore();
+
+  doc.fillColor('#0f172a').font(fonts.bold).fontSize(13);
+  doc.text(t, x + pad, y + pad, { width: innerW });
+  doc.fillColor('#0f172a').font(fonts.regular).fontSize(11);
+  doc.text(b, x + pad, y + pad + titleH + 10, { width: innerW, lineGap: 2 });
+  doc.y = y + total + 14;
+}
+
+function writePdfBoxList(doc, title, items, fonts, palette) {
+  const t = sanitizePdfLine(title);
+  if (!t || !Array.isArray(items) || items.length === 0) return;
+
+  const lines = items.map((x) => sanitizePdfLine(x)).filter(Boolean);
+  if (lines.length === 0) return;
+
+  const x = doc.page.margins.left;
+  const w = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const pad = 16;
+  const innerW = w - pad * 2;
+
+  doc.font(fonts.bold).fontSize(13);
+  const titleH = doc.heightOfString(t, { width: innerW });
+  doc.font(fonts.regular).fontSize(11);
+  let listH = 0;
+  for (const line of lines) {
+    listH += doc.heightOfString(`• ${line}`, { width: innerW, lineGap: 2 });
+  }
+  const total = pad + titleH + 10 + listH + pad;
+  ensureSpace(doc, total + 14);
+
+  const y = doc.y;
+  doc.save();
+  doc.fillColor('#ffffff').roundedRect(x, y, w, total, 16).fill();
+  doc.strokeColor(palette.accent2).opacity(0.20).lineWidth(1).roundedRect(x, y, w, total, 16).stroke();
+  doc.opacity(1);
+  doc.fillColor(palette.accent).roundedRect(x, y, 6, total, 3).fill();
+  doc.restore();
+
+  doc.fillColor('#0f172a').font(fonts.bold).fontSize(13);
+  doc.text(t, x + pad, y + pad, { width: innerW });
+  doc.fillColor('#0f172a').font(fonts.regular).fontSize(11);
+  let yy = y + pad + titleH + 10;
+  for (const line of lines) {
+    doc.text(`• ${line}`, x + pad, yy, { width: innerW, lineGap: 2 });
+    yy = doc.y;
+  }
+  doc.y = y + total + 14;
+}
+
+function startPdfContentPage(doc, fonts, palette, shareUrl) {
+  const w = doc.page.width;
+  const h = doc.page.height;
+  const headerH = 66;
+
+  doc.save();
+  drawVerticalGradient(doc, 0, 0, w, headerH, palette.accent, palette.accent2, 60);
+  doc.restore();
+
+  doc.fillColor('#ffffff').font(fonts.bold).fontSize(16);
+  doc.text('RedFlag Scanner — отчёт', doc.page.margins.left, 26, { width: w - doc.page.margins.left - doc.page.margins.right });
+  doc.fillColor('#ffffff').font(fonts.regular).fontSize(10);
+  doc.text(String(shareUrl || ''), doc.page.margins.left, 46, { width: w - doc.page.margins.left - doc.page.margins.right });
+
+  doc.y = headerH + 18;
+
+  doc.save();
+  doc.rect(0, headerH, w, h - headerH).fill('#f8fafc');
+  doc.restore();
+}
+
+app.get('/api/scan/public/:token.png', async (req, res, next) => {
+  try {
+    const token = typeof req.params?.token === 'string' ? req.params.token.trim() : '';
+    if (!token) {
+      const err = new Error('Поле token обязательно');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prisma = getPrismaClient();
+    const scan = await findPublicScanByToken({ prisma, token });
+    if (!scan || scan.isPublic !== true) {
+      const err = new Error('Скан не найден');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (scan.isPaid !== true) {
+      const err = new Error('Экспорт доступен только после оплаты');
+      err.statusCode = 402;
+      throw err;
+    }
+
+    const verdict = normalizeVerdict(scan.result);
+    const baseUrl = getBaseUrl(req);
+    const shareUrl = `${baseUrl}/r/${encodeURIComponent(scan.shareId)}`;
+    const svg = renderShareCardSvg({ shareUrl, verdict, result: scan.result });
+    const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: 1200 } });
+    const png = resvg.render().asPng();
+
+    res
+      .status(200)
+      .setHeader('Content-Type', 'image/png')
+      .setHeader('Content-Disposition', `attachment; filename="redflag-card-${scan.shareId}.png"`)
+      .setHeader('Cache-Control', 'no-store')
+      .send(png);
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get('/api/scan/public/:token.pdf', async (req, res, next) => {
   try {
     const token = typeof req.params?.token === 'string' ? req.params.token.trim() : '';
@@ -2530,7 +2937,13 @@ app.get('/api/scan/public/:token.pdf', async (req, res, next) => {
       throw err;
     }
 
-    const safeResult = scan.isPaid ? scan.result : redactScanResultForUnpaid(scan.result);
+    if (scan.isPaid !== true) {
+      const err = new Error('Экспорт доступен только после оплаты');
+      err.statusCode = 402;
+      throw err;
+    }
+
+    const safeResult = scan.result;
     const verdict = normalizeVerdict(safeResult);
     const baseUrl = getBaseUrl(req);
     const shareUrl = `${baseUrl}/r/${encodeURIComponent(scan.shareId)}`;
@@ -2551,21 +2964,12 @@ app.get('/api/scan/public/:token.pdf', async (req, res, next) => {
       res.on('close', resolve);
     });
 
-    doc.font(fonts.bold).fontSize(18).text('RedFlag Scanner');
-    doc.moveDown(0.4);
-    doc.font(fonts.regular).fontSize(11).text(`Ссылка: ${shareUrl}`);
-    doc.moveDown(1.0);
-
-    doc.font(fonts.bold).fontSize(14).text(`Рейтинг: ${verdict.rating} / 100`);
-    doc.moveDown(0.4);
-    doc.font(fonts.bold).fontSize(16).text(verdict.short_verdict);
-    doc.moveDown(0.5);
-    doc.font(fonts.regular).fontSize(11).text(verdict.teaser, { lineGap: 2 });
-    doc.moveDown(1.0);
-
-    writePdfSection(doc, 'Полный разбор', safeResult?.full_analysis, fonts);
-    writePdfSection(doc, 'Совет', safeResult?.advice, fonts);
-    writePdfList(doc, 'Красные флаги', extractFlagLines(safeResult), fonts);
+    const { palette } = drawPdfCover({ doc, fonts, verdict, shareUrl, safeResult });
+    startPdfContentPage(doc, fonts, palette, shareUrl);
+    writePdfBoxSection(doc, 'Рейтинг', `Рейтинг: ${verdict.rating} / 100\n${verdict.short_verdict}\n\n${verdict.teaser}`, fonts, palette);
+    writePdfBoxSection(doc, 'Полный разбор', safeResult?.full_analysis, fonts, palette);
+    writePdfBoxSection(doc, 'Совет', safeResult?.advice, fonts, palette);
+    writePdfBoxList(doc, 'Красные флаги', extractFlagLines(safeResult), fonts, palette);
 
     doc.end();
     await done;
@@ -2819,6 +3223,7 @@ app.get(
 
     const doc = new PDFDocument({ size: 'A4', margin: 54, info: { Title: 'RedFlag Scanner — отчёт' } });
     doc.pipe(res);
+    const fonts = registerPdfFonts(doc);
 
     const done = new Promise((resolve, reject) => {
       doc.on('error', reject);
