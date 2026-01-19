@@ -2533,6 +2533,34 @@ function splitTextToSvgLines(text, maxCharsPerLine) {
   return out;
 }
 
+function clampSvgLines(lines, maxLines) {
+  if (!Array.isArray(lines)) return [];
+  const limit = Number.isFinite(maxLines) ? Math.max(1, Math.trunc(maxLines)) : 1;
+  const cleaned = lines
+    .map((x) => String(x || '').trim())
+    .filter((x) => x.length > 0);
+  if (cleaned.length <= limit) return cleaned;
+  const out = cleaned.slice(0, limit);
+  const last = out[out.length - 1] || '';
+  const trimmed = last.length > 1 ? last.replace(/[.\s]+$/g, '').trim() : last;
+  out[out.length - 1] = `${trimmed}…`;
+  return out;
+}
+
+function renderSvgMultilineText({ x, y, lines, lineHeight, attrs }) {
+  const safeLines = Array.isArray(lines) ? lines : [];
+  const lh = Number.isFinite(lineHeight) ? Math.max(1, Number(lineHeight)) : 20;
+  const a = typeof attrs === 'string' ? attrs : '';
+  if (safeLines.length === 0) return '';
+
+  const tspan = [];
+  for (let i = 0; i < safeLines.length; i += 1) {
+    const dy = i === 0 ? 0 : lh;
+    tspan.push(`<tspan x="${x}" dy="${dy}">${escapeXml(safeLines[i])}</tspan>`);
+  }
+  return `<text x="${x}" y="${y}" dominant-baseline="hanging" ${a}>${tspan.join('')}</text>`;
+}
+
 function renderShareCardSvg({ shareUrl, verdict, result }) {
   const width = 1200;
   const height = 630;
@@ -2540,99 +2568,175 @@ function renderShareCardSvg({ shareUrl, verdict, result }) {
   const palette = pickOgPalette(rating);
 
   const family = 'DejaVu Sans,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial';
-  const title = escapeXml(String(verdict?.short_verdict || ''));
-  const teaser = String(verdict?.teaser || '').trim();
-  const subtitle = escapeXml(teaser.length > 170 ? `${teaser.slice(0, 169).trim()}…` : teaser);
+  const titleRaw = String(verdict?.short_verdict || '').trim();
+  const teaserRaw = String(verdict?.teaser || '').trim();
+  const titleLines = clampSvgLines(splitTextToSvgLines(titleRaw, 22), 2);
+  const subtitleLines = clampSvgLines(splitTextToSvgLines(teaserRaw, 48), 2);
+
   const label = escapeXml(palette.label);
-  const safeShare = escapeXml(String(shareUrl || ''));
 
-  const flags = extractFlagLines(result).slice(0, 3);
-  const flagLines = flags
-    .map((x) => String(x || '').trim())
-    .filter(Boolean)
-    .map((x) => (x.length > 88 ? `${x.slice(0, 87).trim()}…` : x));
+  const shareDisplay = (() => {
+    const raw = String(shareUrl || '').trim();
+    if (!raw) return '';
+    let s = '';
+    try {
+      const u = new URL(raw);
+      s = `${u.host}${u.pathname || '/'}`;
+    } catch {
+      s = raw.replace(/^https?:\/\//i, '');
+    }
+    s = s.replace(/\/+$/g, '').replace(/\/{2,}/g, '/');
+    if (s.length > 42) s = `${s.slice(0, 41).trim()}…`;
+    return escapeXml(s);
+  })();
 
-  const lines = [];
-  for (let i = 0; i < flagLines.length; i += 1) {
-    const y = 456 + i * 44;
-    const txt = escapeXml(flagLines[i]);
-    lines.push(`<text x="108" y="${y}" fill="#e2e8f0" font-size="20" font-weight="650">• ${txt}</text>`);
-  }
+  const signalPills = (() => {
+    const items = [];
+    const flags = typeof result === 'object' && result !== null && Array.isArray(result.flags) ? result.flags : [];
+    for (const f of flags) {
+      if (typeof f !== 'object' || f === null) continue;
+      const category = typeof f.category === 'string' ? f.category.trim() : '';
+      const quote = typeof f.quote === 'string' ? f.quote.trim().replace(/\s+/g, ' ') : '';
+      if (!category && !quote) continue;
+
+      let text = category;
+      if (quote) {
+        const q = quote.length > 64 ? `${quote.slice(0, 63).trim()}…` : quote;
+        text = category ? `${category}: «${q}»` : `«${q}»`;
+      }
+
+      text = text.replace(/\u0000/g, '').trim();
+      if (text.length > 72) text = `${text.slice(0, 71).trim()}…`;
+      if (!text) continue;
+      if (items.includes(text)) continue;
+      items.push(text);
+      if (items.length >= 3) break;
+    }
+    if (items.length === 0) items.push('Сигналов не найдено');
+    return items.map((x) => escapeXml(x));
+  })();
+
+  const cardX = 70;
+  const cardY = 110;
+  const cardW = 1060;
+  const cardH = 440;
+  const leftX = cardX + 54;
+  const rightX = cardX + 420;
+  const rightW = cardX + cardW - rightX - 54;
+
+  const chipX = rightX;
+  const chipW = rightW;
+  const chipH = 58;
+  const chipGap = 14;
+  const chipsY = cardY + 300;
+
+  const titleY = cardY + 106;
+  const subtitleY = titleY + titleLines.length * 54 + 14;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#020617" />
-      <stop offset="1" stop-color="#0b1226" />
+      <stop offset="0.55" stop-color="#0b1226" />
+      <stop offset="1" stop-color="#020617" />
     </linearGradient>
-    <radialGradient id="glow" cx="26%" cy="18%" r="70%">
-      <stop offset="0" stop-color="${palette.accent}" stop-opacity="0.30" />
+    <radialGradient id="g1" cx="24%" cy="18%" r="70%">
+      <stop offset="0" stop-color="${palette.accent}" stop-opacity="0.42" />
       <stop offset="1" stop-color="${palette.accent}" stop-opacity="0" />
     </radialGradient>
-    <radialGradient id="glow2" cx="86%" cy="26%" r="70%">
-      <stop offset="0" stop-color="${palette.accent2}" stop-opacity="0.24" />
+    <radialGradient id="g2" cx="84%" cy="28%" r="70%">
+      <stop offset="0" stop-color="${palette.accent2}" stop-opacity="0.34" />
       <stop offset="1" stop-color="${palette.accent2}" stop-opacity="0" />
     </radialGradient>
-    <linearGradient id="chip" x1="0" y1="0" x2="1" y2="0">
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="${palette.accent}" />
       <stop offset="1" stop-color="${palette.accent2}" />
     </linearGradient>
-    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0b1226" stop-opacity="0.75" />
-      <stop offset="1" stop-color="#0b1226" stop-opacity="0.35" />
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1226" stop-opacity="0.78" />
+      <stop offset="1" stop-color="#0b1226" stop-opacity="0.40" />
     </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.55" />
+    </filter>
+    <clipPath id="clipCard">
+      <rect x="${cardX}" y="${cardY}" width="${cardW}" height="${cardH}" rx="34" />
+    </clipPath>
   </defs>
 
   <rect width="${width}" height="${height}" fill="url(#bg)" />
-  <rect width="${width}" height="${height}" fill="url(#glow)" />
-  <rect width="${width}" height="${height}" fill="url(#glow2)" />
+  <rect width="${width}" height="${height}" fill="url(#g1)" />
+  <rect width="${width}" height="${height}" fill="url(#g2)" />
 
   <g font-family="${family}">
-    <g opacity="0.15">
-      <path d="M0 76 H1200" stroke="#e2e8f0" stroke-width="1" />
-      <path d="M0 156 H1200" stroke="#e2e8f0" stroke-width="1" />
-      <path d="M0 236 H1200" stroke="#e2e8f0" stroke-width="1" />
-      <path d="M0 316 H1200" stroke="#e2e8f0" stroke-width="1" />
-      <path d="M0 396 H1200" stroke="#e2e8f0" stroke-width="1" />
-      <path d="M0 476 H1200" stroke="#e2e8f0" stroke-width="1" />
-      <path d="M0 556 H1200" stroke="#e2e8f0" stroke-width="1" />
-    </g>
-
     <g transform="translate(70 62)">
-      <text x="0" y="0" fill="#e2e8f0" font-size="26" font-weight="900" letter-spacing="6">REDFLAG SCANNER</text>
-      <text x="0" y="32" fill="#94a3b8" font-size="14" font-weight="700">${safeShare}</text>
+      <text x="0" y="0" fill="#e2e8f0" font-size="22" font-weight="950" letter-spacing="6">REDFLAG SCANNER</text>
+      ${shareDisplay ? `<text x="0" y="28" fill="#94a3b8" font-size="13" font-weight="700">${shareDisplay}</text>` : ''}
     </g>
 
-    <g transform="translate(70 120)">
-      <rect x="0" y="0" width="1060" height="420" rx="28" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.10" />
-      <rect x="0" y="0" width="1060" height="6" rx="3" fill="url(#chip)" />
+    <rect x="${cardX}" y="${cardY}" width="${cardW}" height="${cardH}" rx="34" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.10" filter="url(#shadow)" />
+    <rect x="${cardX}" y="${cardY}" width="${cardW}" height="7" rx="3.5" fill="url(#accent)" />
 
-      <g transform="translate(38 46)">
-        <rect x="0" y="0" width="230" height="52" rx="26" fill="url(#chip)" fill-opacity="0.16" stroke="url(#chip)" stroke-opacity="0.45" />
-        <text x="115" y="35" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="900" letter-spacing="4">${label}</text>
+    <g clip-path="url(#clipCard)">
+      <g transform="translate(${leftX} ${cardY + 44})">
+        <rect x="0" y="0" width="260" height="44" rx="22" fill="url(#accent)" fill-opacity="0.16" stroke="url(#accent)" stroke-opacity="0.55" />
+        <text x="130" y="22" text-anchor="middle" dominant-baseline="middle" fill="#ffffff" font-size="13" font-weight="950" letter-spacing="4">${label}</text>
+
+        <g transform="translate(0 74)">
+          <circle cx="130" cy="98" r="92" fill="#0b1226" fill-opacity="0.40" stroke="url(#accent)" stroke-opacity="0.85" stroke-width="6" />
+          <circle cx="130" cy="98" r="74" fill="#0b1226" fill-opacity="0.55" />
+          <text x="130" y="88" text-anchor="middle" dominant-baseline="middle" fill="#ffffff" font-size="78" font-weight="950">${rating}</text>
+          <text x="130" y="134" text-anchor="middle" dominant-baseline="middle" fill="#94a3b8" font-size="14" font-weight="900" letter-spacing="3">ИЗ 100</text>
+          <text x="130" y="158" text-anchor="middle" dominant-baseline="middle" fill="#94a3b8" font-size="12" font-weight="900" letter-spacing="4">РЕЙТИНГ</text>
+        </g>
       </g>
 
-      <g transform="translate(38 138)">
-        <text x="0" y="0" fill="#ffffff" font-size="92" font-weight="900">${rating}</text>
-        <text x="168" y="-12" fill="#94a3b8" font-size="24" font-weight="800" letter-spacing="4">/ 100</text>
-        <text x="0" y="64" fill="#94a3b8" font-size="16" font-weight="900" letter-spacing="6">РЕЙТИНГ</text>
+      <g transform="translate(${rightX} ${titleY})">
+        ${renderSvgMultilineText({
+          x: 0,
+          y: 0,
+          lines: titleLines,
+          lineHeight: 54,
+          attrs: 'fill="#ffffff" font-size="52" font-weight="950"',
+        })}
       </g>
 
-      <g transform="translate(360 154)">
-        <text x="0" y="0" fill="#ffffff" font-size="52" font-weight="950">${title}</text>
-        <text x="0" y="56" fill="#cbd5e1" font-size="24" font-weight="650">${subtitle}</text>
+      <g transform="translate(${rightX} ${subtitleY})">
+        ${renderSvgMultilineText({
+          x: 0,
+          y: 0,
+          lines: subtitleLines,
+          lineHeight: 30,
+          attrs: 'fill="#cbd5e1" font-size="22" font-weight="650"',
+        })}
       </g>
 
-      <g transform="translate(38 326)">
-        <text x="0" y="0" fill="#94a3b8" font-size="16" font-weight="900" letter-spacing="6">ТОП СИГНАЛЫ</text>
+      <g transform="translate(${rightX} ${cardY + 260})">
+        <text x="0" y="0" fill="#94a3b8" font-size="13" font-weight="950" letter-spacing="6">КЛЮЧЕВЫЕ СИГНАЛЫ</text>
       </g>
 
-      ${lines.join('\n      ')}
+      <g>
+        ${signalPills
+          .slice(0, 3)
+          .map((t, idx) => {
+            const y = chipsY + idx * (chipH + chipGap);
+            const textLines = clampSvgLines(splitTextToSvgLines(t, 60), 1);
+            const labelText = textLines[0] ? escapeXml(textLines[0]) : '';
+            return `
+        <g transform="translate(${chipX} ${y})">
+          <rect x="0" y="0" width="${chipW}" height="${chipH}" rx="18" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.10" />
+          <rect x="0" y="0" width="${chipW}" height="${chipH}" rx="18" fill="none" stroke="url(#accent)" stroke-opacity="0.32" />
+          <circle cx="22" cy="${chipH / 2}" r="6" fill="url(#accent)" />
+          <text x="40" y="${chipH / 2}" dominant-baseline="middle" fill="#e2e8f0" font-size="18" font-weight="700">${labelText}</text>
+        </g>`;
+          })
+          .join('')}
+      </g>
     </g>
 
-    <g transform="translate(70 584)">
-      <text x="0" y="0" fill="#94a3b8" font-size="18" font-weight="700">Поделись: картинка доступна только после оплаты</text>
+    <g transform="translate(70 602)">
+      <text x="0" y="0" fill="#94a3b8" font-size="14" font-weight="700">Анализ переписки с помощью AI • toxiscan.ru</text>
     </g>
   </g>
 </svg>`;
