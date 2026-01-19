@@ -1654,6 +1654,7 @@ function renderOgSvg({ rating, shortVerdict, teaser }) {
   const title = escapeXml(shortVerdict);
   const subtitle = escapeXml(teaser.length > 180 ? `${teaser.slice(0, 179).trim()}…` : teaser);
   const label = escapeXml(palette.label);
+  const family = 'DejaVu Sans,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
@@ -1676,7 +1677,7 @@ function renderOgSvg({ rating, shortVerdict, teaser }) {
   <rect width="1200" height="630" fill="url(#glow)" />
   <rect width="1200" height="630" fill="url(#glow2)" />
 
-  <g font-family="ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial">
+  <g font-family="${family}">
     <text x="80" y="110" fill="#e2e8f0" font-size="28" font-weight="800" letter-spacing="6">REDFLAG SCANNER</text>
 
     <g transform="translate(80 170)">
@@ -2450,22 +2451,42 @@ function sanitizePdfLine(value) {
   return s.replace(/\u0000/g, '').trim();
 }
 
-function writePdfSection(doc, title, body) {
+function registerPdfFonts(doc) {
+  const regularPath =
+    (typeof process.env.PDF_FONT_REGULAR === 'string' ? process.env.PDF_FONT_REGULAR.trim() : '') ||
+    '/usr/share/fonts/ttf-dejavu/DejaVuSans.ttf';
+  const boldPath =
+    (typeof process.env.PDF_FONT_BOLD === 'string' ? process.env.PDF_FONT_BOLD.trim() : '') ||
+    '/usr/share/fonts/ttf-dejavu/DejaVuSans-Bold.ttf';
+
+  const hasRegular = regularPath && fs.existsSync(regularPath);
+  const hasBold = boldPath && fs.existsSync(boldPath);
+
+  if (hasRegular) doc.registerFont('ui', regularPath);
+  if (hasBold) doc.registerFont('ui-bold', boldPath);
+
+  return {
+    regular: hasRegular ? 'ui' : 'Helvetica',
+    bold: hasBold ? 'ui-bold' : 'Helvetica-Bold',
+  };
+}
+
+function writePdfSection(doc, title, body, fonts) {
   const t = sanitizePdfLine(title);
   const b = sanitizePdfLine(body);
   if (!t || !b) return;
-  doc.fontSize(13).font('Helvetica-Bold').text(t);
+  doc.fontSize(13).font(fonts.bold).text(t);
   doc.moveDown(0.35);
-  doc.fontSize(11).font('Helvetica').text(b, { lineGap: 2 });
+  doc.fontSize(11).font(fonts.regular).text(b, { lineGap: 2 });
   doc.moveDown(0.9);
 }
 
-function writePdfList(doc, title, items) {
+function writePdfList(doc, title, items, fonts) {
   const t = sanitizePdfLine(title);
   if (!t || !Array.isArray(items) || items.length === 0) return;
-  doc.fontSize(13).font('Helvetica-Bold').text(t);
+  doc.fontSize(13).font(fonts.bold).text(t);
   doc.moveDown(0.35);
-  doc.fontSize(11).font('Helvetica');
+  doc.fontSize(11).font(fonts.regular);
   for (const item of items) {
     const line = sanitizePdfLine(item);
     if (!line) continue;
@@ -2521,6 +2542,7 @@ app.get('/api/scan/public/:token.pdf', async (req, res, next) => {
 
     const doc = new PDFDocument({ size: 'A4', margin: 54, info: { Title: 'RedFlag Scanner — отчёт' } });
     doc.pipe(res);
+    const fonts = registerPdfFonts(doc);
 
     const done = new Promise((resolve, reject) => {
       doc.on('error', reject);
@@ -2529,21 +2551,21 @@ app.get('/api/scan/public/:token.pdf', async (req, res, next) => {
       res.on('close', resolve);
     });
 
-    doc.font('Helvetica-Bold').fontSize(18).text('RedFlag Scanner');
+    doc.font(fonts.bold).fontSize(18).text('RedFlag Scanner');
     doc.moveDown(0.4);
-    doc.font('Helvetica').fontSize(11).text(`Ссылка: ${shareUrl}`);
+    doc.font(fonts.regular).fontSize(11).text(`Ссылка: ${shareUrl}`);
     doc.moveDown(1.0);
 
-    doc.font('Helvetica-Bold').fontSize(14).text(`Рейтинг: ${verdict.rating} / 100`);
+    doc.font(fonts.bold).fontSize(14).text(`Рейтинг: ${verdict.rating} / 100`);
     doc.moveDown(0.4);
-    doc.font('Helvetica-Bold').fontSize(16).text(verdict.short_verdict);
+    doc.font(fonts.bold).fontSize(16).text(verdict.short_verdict);
     doc.moveDown(0.5);
-    doc.font('Helvetica').fontSize(11).text(verdict.teaser, { lineGap: 2 });
+    doc.font(fonts.regular).fontSize(11).text(verdict.teaser, { lineGap: 2 });
     doc.moveDown(1.0);
 
-    writePdfSection(doc, 'Полный разбор', safeResult?.full_analysis);
-    writePdfSection(doc, 'Совет', safeResult?.advice);
-    writePdfList(doc, 'Красные флаги', extractFlagLines(safeResult));
+    writePdfSection(doc, 'Полный разбор', safeResult?.full_analysis, fonts);
+    writePdfSection(doc, 'Совет', safeResult?.advice, fonts);
+    writePdfList(doc, 'Красные флаги', extractFlagLines(safeResult), fonts);
 
     doc.end();
     await done;
@@ -2805,21 +2827,21 @@ app.get(
       res.on('close', resolve);
     });
 
-    doc.font('Helvetica-Bold').fontSize(18).text('RedFlag Scanner');
+    doc.font(fonts.bold).fontSize(18).text('RedFlag Scanner');
     doc.moveDown(0.4);
-    doc.font('Helvetica').fontSize(11).text(`Ссылка: ${shareUrl}`);
+    doc.font(fonts.regular).fontSize(11).text(`Ссылка: ${shareUrl}`);
     doc.moveDown(1.0);
 
-    doc.font('Helvetica-Bold').fontSize(14).text(`Рейтинг: ${verdict.rating} / 100`);
+    doc.font(fonts.bold).fontSize(14).text(`Рейтинг: ${verdict.rating} / 100`);
     doc.moveDown(0.4);
-    doc.font('Helvetica-Bold').fontSize(16).text(verdict.short_verdict);
+    doc.font(fonts.bold).fontSize(16).text(verdict.short_verdict);
     doc.moveDown(0.5);
-    doc.font('Helvetica').fontSize(11).text(verdict.teaser, { lineGap: 2 });
+    doc.font(fonts.regular).fontSize(11).text(verdict.teaser, { lineGap: 2 });
     doc.moveDown(1.0);
 
-    writePdfSection(doc, 'Полный разбор', safeResult?.full_analysis);
-    writePdfSection(doc, 'Совет', safeResult?.advice);
-    writePdfList(doc, 'Красные флаги', extractFlagLines(safeResult));
+    writePdfSection(doc, 'Полный разбор', safeResult?.full_analysis, fonts);
+    writePdfSection(doc, 'Совет', safeResult?.advice, fonts);
+    writePdfList(doc, 'Красные флаги', extractFlagLines(safeResult), fonts);
 
     doc.end();
     await done;

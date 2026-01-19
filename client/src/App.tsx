@@ -579,83 +579,96 @@ function ResultsCard({
           Поделиться ссылкой
         </button>
 
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setExportOpen((v) => !v)}
-            className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
-          >
-            Экспорт
-          </button>
+        {isPaid ? (
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setExportOpen((v) => !v)}
+              className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-5 py-4 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-white/10 active:bg-white/5"
+            >
+              Экспорт
+            </button>
 
-          {exportOpen ? (
-            <div className="absolute left-0 top-full z-20 mt-3 w-[min(360px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-white/10 bg-slate-950/95 shadow-[0_0_40px_rgba(0,0,0,0.35)] backdrop-blur">
-              <button
-                type="button"
-                onClick={() => {
-                  setExportOpen(false);
-                  reachGoal('copy_result');
-                  onCopy();
-                }}
-                className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left text-sm font-semibold text-white/90 transition hover:bg-white/5"
-              >
-                <span>Скопировать текст</span>
-                <span className="text-xs font-black uppercase tracking-[0.14em] text-white/50">CTRL+C</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setExportOpen(false);
-                  reachGoal('download_result');
-                  onDownload();
-                }}
-                className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left text-sm font-semibold text-white/90 transition hover:bg-white/5"
-              >
-                <span>Скачать TXT</span>
-                <span className="text-xs font-black uppercase tracking-[0.14em] text-white/50">.TXT</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setExportOpen(false);
-                  reachGoal('download_pdf');
-                  onDownloadPdf();
-                }}
-                className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left text-sm font-semibold text-white/90 transition hover:bg-white/5"
-              >
-                <span>Скачать PDF</span>
-                <span className="text-xs font-black uppercase tracking-[0.14em] text-white/50">.PDF</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setExportOpen(false);
-                  reachGoal('download_image');
-                  onDownloadImage();
-                }}
-                className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left text-sm font-semibold text-white/90 transition hover:bg-white/5"
-              >
-                <span>Скачать картинку</span>
-                <span className="text-xs font-black uppercase tracking-[0.14em] text-white/50">.PNG</span>
-              </button>
-
-              {canDelete ? (
+            {exportOpen ? (
+              <div className="absolute left-0 top-full z-20 mt-3 w-[min(360px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-white/10 bg-slate-950/95 shadow-[0_0_40px_rgba(0,0,0,0.35)] backdrop-blur">
                 <button
                   type="button"
                   onClick={() => {
                     setExportOpen(false);
-                    reachGoal('delete_scan_click');
-                    onDelete();
+                    reachGoal('copy_result');
+                    onCopy();
                   }}
-                  className="flex w-full items-center justify-between gap-3 border-t border-white/10 px-5 py-4 text-left text-sm font-semibold text-red-100 transition hover:bg-red-500/10"
+                  className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left text-sm font-semibold text-white/90 transition hover:bg-white/5"
                 >
-                  <span>Удалить отчёт</span>
-                  <span className="text-xs font-black uppercase tracking-[0.14em] text-red-200/70">опасно</span>
+                  <span>Скопировать текст</span>
+                  <span className="text-xs font-black uppercase tracking-[0.14em] text-white/50">CTRL+C</span>
                 </button>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    reachGoal('download_result');
+                    onDownload();
+                  }}
+                  className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left text-sm font-semibold text-white/90 transition hover:bg-white/5"
+                >
+                  <span>Скачать TXT</span>
+                  <span className="text-xs font-black uppercase tracking-[0.14em] text-white/50">.TXT</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    reachGoal('download_pdf');
+                    onDownloadPdf();
+                  }}
+                  className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left text-sm font-semibold text-white/90 transition hover:bg-white/5"
+                >
+                  <span>Скачать PDF</span>
+                  <span className="text-xs font-black uppercase tracking-[0.14em] text-white/50">.PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    reachGoal('download_image');
+                    onDownloadImage();
+                  }}
+                  className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left text-sm font-semibold text-white/90 transition hover:bg-white/5"
+                >
+                  <span>Скачать картинку</span>
+                  <span className="text-xs font-black uppercase tracking-[0.14em] text-white/50">.PNG</span>
+                </button>
+
+                {canDelete ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportOpen(false);
+                      reachGoal('delete_scan_click');
+                      onDelete();
+                    }}
+                    className="flex w-full items-center justify-between gap-3 border-t border-white/10 px-5 py-4 text-left text-sm font-semibold text-red-100 transition hover:bg-red-500/10"
+                  >
+                    <span>Удалить отчёт</span>
+                    <span className="text-xs font-black uppercase tracking-[0.14em] text-red-200/70">опасно</span>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        ) : canDelete ? (
+          <button
+            type="button"
+            onClick={() => {
+              reachGoal('delete_scan_click');
+              onDelete();
+            }}
+            className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-red-500/10 px-5 py-4 text-sm font-black uppercase tracking-[0.14em] text-red-100 transition hover:bg-red-500/15 active:bg-red-500/10"
+          >
+            Удалить отчёт
+          </button>
+        ) : null}
       </div>
 
       {autoDeleteAt ? (

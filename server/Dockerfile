@@ -3,10 +3,12 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-rus tesseract-ocr-data-eng
+RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-rus tesseract-ocr-data-eng fontconfig ttf-dejavu
 
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
+
+RUN npm i --no-save prisma@6.19.2
 
 COPY prisma ./prisma
 RUN npx prisma generate
