@@ -1775,6 +1775,17 @@ const authLimiter = rateLimit({
   },
 });
 
+const csrfLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  limit: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ error: 'Слишком много попыток. Попробуй позже.' });
+  },
+});
+
 const webhookLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 120,
@@ -2174,7 +2185,7 @@ app.post(
   }),
 );
 
-app.get('/api/auth/csrf', authLimiter, async (req, res, next) => {
+app.get('/api/auth/csrf', csrfLimiter, async (req, res, next) => {
   try {
     const token = makeCsrfToken();
     setCsrfCookie(req, res, token, getCsrfTtlSeconds());

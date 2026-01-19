@@ -1178,7 +1178,13 @@ export default function App() {
   }, [authPanelOpen, authUser, handleTelegramAuth, telegramBot.isValid, telegramBot.username]);
 
   useEffect(() => {
-    void ensureCsrfToken();
+    void (async () => {
+      try {
+        await ensureCsrfToken();
+      } catch {
+        return;
+      }
+    })();
   }, [ensureCsrfToken]);
 
   useEffect(() => {
