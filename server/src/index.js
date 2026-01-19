@@ -304,6 +304,51 @@ function normalizeTranscriptForAi(input) {
   const cleaned = sanitizeTextForAi(input);
   if (!cleaned) return '';
 
+  function parseTelegramTextExport(text) {
+    const lines = String(text ?? '')
+      .replace(/\r\n?/g, '\n')
+      .split('\n')
+      .map((l) => String(l ?? '').trim());
+
+    const headerRe =
+      /^(.{1,120}?)\s*,\s*\[\s*(\d{1,2}[./]\d{1,2}[./]\d{2,4})(?:,\s*|\s+)(\d{1,2}:\d{2})(?::\d{2})?\s*\]\s*$/u;
+
+    const parsed = [];
+    let current = null;
+    let matchedHeaders = 0;
+
+    for (const line of lines) {
+      if (!line) continue;
+      const m = line.match(headerRe);
+      if (m) {
+        matchedHeaders += 1;
+        if (current && String(current.message ?? '').trim()) parsed.push(current);
+        current = { name: String(m[1] ?? '').trim(), message: '' };
+        continue;
+      }
+
+      if (!current) current = { name: '', message: '' };
+      const prev = String(current.message ?? '').trim();
+      current.message = prev ? `${prev} ${line}` : line;
+    }
+
+    if (current && String(current.message ?? '').trim()) parsed.push(current);
+
+    if (matchedHeaders < 2 || parsed.length < 2) return null;
+
+    const uniqueNames = new Set(parsed.map((x) => String(x?.name ?? '').trim()).filter(Boolean));
+    if (uniqueNames.size < 2) return null;
+
+    return parsed
+      .map((x) => ({
+        name: String(x?.name ?? '').trim(),
+        message: String(x?.message ?? '')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      }))
+      .filter((x) => x.message);
+  }
+
   function compactSpeakers(lines) {
     const map = new Map();
     let nextIndex = 0;
@@ -330,6 +375,23 @@ function normalizeTranscriptForAi(input) {
     }
 
     return sanitizeTextForAi(out.join('\n'));
+  }
+
+  const telegramExport = parseTelegramTextExport(cleaned);
+  if (telegramExport) {
+    const compact = compactSpeakers(telegramExport);
+    if (compact) return compact;
+    return sanitizeTextForAi(
+      telegramExport
+        .map((x) => {
+          const name = String(x?.name ?? '').trim();
+          const message = String(x?.message ?? '').trim();
+          if (!message) return '';
+          return name ? `${name}: ${message}` : message;
+        })
+        .filter(Boolean)
+        .join('\n'),
+    );
   }
 
   const asDialogue = sanitizeTextForAi(formatOcrDialogue(cleaned, 'auto'));
