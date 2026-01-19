@@ -2194,6 +2194,14 @@ app.get('/sitemap.xml', async (req, res) => {
     { loc: `${baseUrl}/lp/control`, changefreq: 'weekly', priority: '0.8' },
     { loc: `${baseUrl}/lp/silent-treatment`, changefreq: 'weekly', priority: '0.8' },
     { loc: `${baseUrl}/lp/boundaries`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/jealousy`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/devaluation`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/ultimatums`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/love-bombing`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/passive-aggression`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/blame-shifting`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/blackmail`, changefreq: 'weekly', priority: '0.7' },
+    { loc: `${baseUrl}/lp/ghosting`, changefreq: 'weekly', priority: '0.7' },
   ];
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>

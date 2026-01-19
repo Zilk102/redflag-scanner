@@ -58,8 +58,30 @@ type AiFlag = {
   what_to_reply: string;
 };
 
+const HERO_TITLES = [
+  'КРАСНЫЕ ФЛАГИ В ПЕРЕПИСКЕ?',
+  'ОН(А) ДАВИТ ИЛИ ТЕБЕ КАЖЕТСЯ?',
+  'ПРОВЕРЬ ДИАЛОГ НА ТОКСИЧНОСТЬ',
+  'МАНИПУЛЯЦИИ, РЕВНОСТЬ, КОНТРОЛЬ — ВИДНО ПО СЛОВАМ',
+  'РАЗБОР ПЕРЕПИСКИ: ЗАБОТА ИЛИ АБЬЮЗ?',
+  'НЕЙРОСЕТЬ НАЙДЁТ ГАЗЛАЙТИНГ И ДАВЛЕНИЕ',
+  'ПРОВЕРЬ ПЕРЕПИСКУ С ДРУГОМ, ПАРТНЁРОМ ИЛИ БЫВШИМ',
+  'ГДЕ В ДИАЛОГЕ НАЧИНАЕТСЯ ОБЕСЦЕНИВАНИЕ?',
+  'СОБЕСЕДНИК ИГРАЕТ В ВИНУ И ШАНТАЖ?',
+];
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
+}
+
+function getRandomIndex(max: number) {
+  if (!Number.isFinite(max) || max <= 1) return 0;
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const out = new Uint32Array(1);
+    crypto.getRandomValues(out);
+    return out[0] % max;
+  }
+  return Math.floor(Math.random() * max);
 }
 
 function normalizeTelegramBotUsername(raw: string) {
@@ -941,6 +963,7 @@ function DeleteConfirmModal({
 }
 
 export default function App() {
+  const heroTitle = useMemo(() => HERO_TITLES[getRandomIndex(HERO_TITLES.length)] ?? HERO_TITLES[0], []);
   const [text, setText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
@@ -984,9 +1007,9 @@ export default function App() {
 
     const defaultTitle = 'RedFlag Scanner — Проверь переписку на токсичность';
     const defaultDescription =
-      'Нейросеть ищет красные флаги, манипуляции и газлайтинг в твоих чатах. Узнай правду о бывшем.';
-    const defaultOgTitle = 'Твой бывший — абьюзер? Проверь нейросетью.';
-    const defaultOgDescription = 'Загрузи скрин переписки и получи честный психоразбор.';
+      'Нейросеть ищет красные флаги, манипуляции и газлайтинг в твоих чатах. Узнай правду о человеке по переписке.';
+    const defaultOgTitle = 'Красные флаги в переписке? Проверь нейросетью.';
+    const defaultOgDescription = 'Загрузи скрин или текст и получи честный психоразбор.';
 
     const shareId = typeof scanResult?.shareId === 'string' ? scanResult.shareId : '';
     const hasPublicShare = Boolean(shareId && scanResult?.isPublic === true);
@@ -1118,7 +1141,7 @@ export default function App() {
     };
   }, [ai, scanResult]);
   const loadingLabels = useMemo(
-    () => ['Анализируем токсичность...', 'Ищем красные флаги...', 'Связываемся с базой бывших...'],
+    () => ['Анализируем токсичность...', 'Ищем красные флаги...', 'Собираем картину диалога...'],
     [],
   );
 
@@ -1900,10 +1923,10 @@ export default function App() {
 
           <div className="grid gap-3">
             <h1 className="text-balance text-4xl font-black tracking-tight text-slate-50 sm:text-6xl">
-              ТВОЙ БЫВШИЙ — ТОКСИК?
+              {heroTitle}
             </h1>
             <p className="max-w-2xl text-base leading-relaxed text-slate-300 sm:text-lg">
-              Нейросеть проанализирует переписку и скажет правду
+              Нейросеть проанализирует переписку и покажет, где начинаются манипуляции
             </p>
           </div>
         </section>
