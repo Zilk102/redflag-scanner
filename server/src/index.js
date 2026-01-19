@@ -1711,12 +1711,150 @@ function pickOgPalette(rating) {
   };
 }
 
+function normalizeOgText(value) {
+  const s = typeof value === 'string' ? value : '';
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+function wrapOgText(value, maxChars) {
+  const text = normalizeOgText(value);
+  if (!text) return [];
+  const words = text.split(' ');
+  const lines = [];
+  let current = '';
+
+  for (const rawWord of words) {
+    const word = rawWord.trim();
+    if (!word) continue;
+
+    if (!current) {
+      if (word.length <= maxChars) {
+        current = word;
+      } else {
+        lines.push(`${word.slice(0, Math.max(1, maxChars - 1))}…`);
+      }
+      continue;
+    }
+
+    if (current.length + 1 + word.length <= maxChars) {
+      current = `${current} ${word}`;
+      continue;
+    }
+
+    lines.push(current);
+    if (word.length <= maxChars) {
+      current = word;
+    } else {
+      current = '';
+      lines.push(`${word.slice(0, Math.max(1, maxChars - 1))}…`);
+    }
+  }
+
+  if (current) lines.push(current);
+  return lines;
+}
+
+function clampOgLines(lines, maxLines) {
+  if (!Array.isArray(lines) || lines.length === 0) return [];
+  if (lines.length <= maxLines) return lines;
+
+  const sliced = lines.slice(0, maxLines);
+  const last = sliced[maxLines - 1] ?? '';
+  if (!last.endsWith('…')) sliced[maxLines - 1] = `${last.replace(/\s+$/g, '')}…`;
+  return sliced;
+}
+
+function estimateMaxCharsForFont(fontSizePx) {
+  const availableWidth = 1040;
+  const perChar = Math.max(12, Math.floor(availableWidth / (fontSizePx * 0.62)));
+  return perChar;
+}
+
 function renderOgSvg({ rating, shortVerdict, teaser }) {
   const palette = pickOgPalette(rating);
-  const title = escapeXml(shortVerdict);
-  const subtitle = escapeXml(teaser.length > 180 ? `${teaser.slice(0, 179).trim()}…` : teaser);
+  const rawTitle = normalizeOgText(shortVerdict);
+  const rawSubtitle = normalizeOgText(teaser.length > 240 ? `${teaser.slice(0, 239).trim()}…` : teaser);
   const label = escapeXml(palette.label);
   const family = 'DejaVu Sans,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial';
+
+  const subtitleFontSize = 28;
+  const subtitleLineHeight = Math.round(subtitleFontSize * 1.28);
+  const maxSubtitleChars = estimateMaxCharsForFont(subtitleFontSize);
+  const subtitleLinesBase = clampOgLines(wrapOgText(rawSubtitle, maxSubtitleChars), 2);
+
+  const titleFontCandidates = [58, 54, 50, 46, 42];
+  let titleFontSize = 58;
+  let titleLineHeight = Math.round(titleFontSize * 1.08);
+  let titleLines = [];
+  let subtitleLines = subtitleLinesBase;
+
+  let titleTranslateY = 410;
+  let subtitleTranslateY = 520;
+  let ctaTranslateY = 600;
+
+  for (const candidate of titleFontCandidates) {
+    const maxTitleChars = estimateMaxCharsForFont(candidate);
+    const candidateLines = clampOgLines(wrapOgText(rawTitle, maxTitleChars), 2);
+    const candidateTitleLineHeight = Math.round(candidate * 1.08);
+
+    const titleLastBaselineY = candidateLines.length === 0 ? candidate : candidate + (candidateLines.length - 1) * candidateTitleLineHeight;
+    const candidateTitleTranslateY = 410;
+    const candidateSubtitleTranslateY = candidateTitleTranslateY + titleLastBaselineY + 28;
+    const subtitleLineCount = subtitleLinesBase.length;
+    const subtitleLastBaselineY = subtitleLineCount === 0 ? subtitleFontSize : subtitleFontSize + (subtitleLineCount - 1) * subtitleLineHeight;
+    const candidateCtaTranslateY = candidateSubtitleTranslateY + subtitleLastBaselineY + 34;
+
+    if (candidateCtaTranslateY + 22 <= 610) {
+      titleFontSize = candidate;
+      titleLineHeight = candidateTitleLineHeight;
+      titleLines = candidateLines;
+      subtitleLines = subtitleLinesBase;
+      titleTranslateY = candidateTitleTranslateY;
+      subtitleTranslateY = candidateSubtitleTranslateY;
+      ctaTranslateY = candidateCtaTranslateY;
+      break;
+    }
+
+    const subtitleSingle = clampOgLines(subtitleLinesBase, 1);
+    const subtitleSingleLastBaselineY =
+      subtitleSingle.length === 0 ? subtitleFontSize : subtitleFontSize + (subtitleSingle.length - 1) * subtitleLineHeight;
+    const candidateCtaTranslateY2 = candidateSubtitleTranslateY + subtitleSingleLastBaselineY + 34;
+    if (candidateCtaTranslateY2 + 22 <= 610) {
+      titleFontSize = candidate;
+      titleLineHeight = candidateTitleLineHeight;
+      titleLines = candidateLines;
+      subtitleLines = subtitleSingle;
+      titleTranslateY = candidateTitleTranslateY;
+      subtitleTranslateY = candidateSubtitleTranslateY;
+      ctaTranslateY = candidateCtaTranslateY2;
+      break;
+    }
+
+    titleFontSize = candidate;
+    titleLineHeight = candidateTitleLineHeight;
+    titleLines = candidateLines;
+    subtitleLines = subtitleSingle;
+    titleTranslateY = candidateTitleTranslateY;
+    subtitleTranslateY = candidateSubtitleTranslateY;
+    ctaTranslateY = candidateCtaTranslateY2;
+  }
+
+  const safeTitleLines = titleLines.length > 0 ? titleLines : clampOgLines(wrapOgText(rawTitle, 28), 2);
+  const safeSubtitleLines = subtitleLines.length > 0 ? subtitleLines : clampOgLines(wrapOgText(rawSubtitle, 56), 2);
+
+  const titleSvg = safeTitleLines
+    .map((line, index) => {
+      const y = titleFontSize + index * titleLineHeight;
+      return `<text x="0" y="${y}" fill="#ffffff" font-size="${titleFontSize}" font-weight="900">${escapeXml(line)}</text>`;
+    })
+    .join('\n      ');
+
+  const subtitleSvg = safeSubtitleLines
+    .map((line, index) => {
+      const y = subtitleFontSize + index * subtitleLineHeight;
+      return `<text x="0" y="${y}" fill="#cbd5e1" font-size="${subtitleFontSize}" font-weight="600">${escapeXml(line)}</text>`;
+    })
+    .join('\n      ');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
@@ -1753,15 +1891,15 @@ function renderOgSvg({ rating, shortVerdict, teaser }) {
       <text x="0" y="132" fill="#94a3b8" font-size="18" font-weight="800" letter-spacing="6">РЕЙТИНГ</text>
     </g>
 
-    <g transform="translate(80 390)">
-      <text x="0" y="0" fill="#ffffff" font-size="58" font-weight="900">${title}</text>
+    <g transform="translate(80 ${titleTranslateY})">
+      ${titleSvg}
     </g>
 
-    <g transform="translate(80 458)">
-      <text x="0" y="0" fill="#cbd5e1" font-size="28" font-weight="600">${subtitle}</text>
+    <g transform="translate(80 ${subtitleTranslateY})">
+      ${subtitleSvg}
     </g>
 
-    <g transform="translate(80 560)">
+    <g transform="translate(80 ${ctaTranslateY})">
       <text x="0" y="0" fill="#94a3b8" font-size="22" font-weight="700">Открой отчёт по ссылке</text>
     </g>
   </g>
