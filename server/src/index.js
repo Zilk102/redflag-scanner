@@ -244,6 +244,140 @@ function buildRobokassaPaymentUrl({ invId, outSum, description, shpParams, email
   return url.toString();
 }
 
+function escapeHtmlAttribute(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+function encodeRobokassaFormFieldValue(name, value) {
+  const p = new URLSearchParams();
+  p.set(String(name), String(value ?? ''));
+  const s = p.toString();
+  const prefix = `${String(name)}=`;
+  return s.startsWith(prefix) ? s.slice(prefix.length) : encodeURIComponent(String(value ?? '')).replaceAll('%20', '+');
+}
+
+function getRobokassaReceiptConfig() {
+  const itemName =
+    (typeof process.env.ROBOKASSA_RECEIPT_ITEM_NAME === 'string' ? process.env.ROBOKASSA_RECEIPT_ITEM_NAME.trim() : '') ||
+    'Открыть полный отчёт';
+  const tax = (typeof process.env.ROBOKASSA_RECEIPT_TAX === 'string' ? process.env.ROBOKASSA_RECEIPT_TAX.trim() : '') || 'none';
+  const paymentMethod =
+    (typeof process.env.ROBOKASSA_RECEIPT_PAYMENT_METHOD === 'string'
+      ? process.env.ROBOKASSA_RECEIPT_PAYMENT_METHOD.trim()
+      : '') || 'full_payment';
+  const paymentObject =
+    (typeof process.env.ROBOKASSA_RECEIPT_PAYMENT_OBJECT === 'string'
+      ? process.env.ROBOKASSA_RECEIPT_PAYMENT_OBJECT.trim()
+      : '') || 'service';
+  const sno = typeof process.env.ROBOKASSA_RECEIPT_SNO === 'string' ? process.env.ROBOKASSA_RECEIPT_SNO.trim() : '';
+  return { itemName, tax, paymentMethod, paymentObject, sno };
+}
+
+function buildRobokassaReceiptJson({ outSum }) {
+  const sum = normalizeRobokassaOutSum(outSum);
+  if (!sum) {
+    const err = new Error('Некорректная сумма для чека');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const cfg = getRobokassaReceiptConfig();
+  const sumNumber = Number(sum);
+
+  const receipt = {
+    items: [
+      {
+        name: cfg.itemName,
+        quantity: 1,
+        sum: sumNumber,
+        cost: sumNumber,
+        payment_method: cfg.paymentMethod,
+        payment_object: cfg.paymentObject,
+        tax: cfg.tax,
+      },
+    ],
+  };
+
+  if (cfg.sno) {
+    receipt.sno = cfg.sno;
+  }
+
+  return JSON.stringify(receipt);
+}
+
+function buildRobokassaPaymentFormHtml({ invId, outSum, description, shpParams, email, receiptJson }) {
+  const cfg = getRobokassaConfig();
+  const sum = normalizeRobokassaOutSum(outSum);
+  if (!sum) {
+    const err = new Error('Некорректная сумма');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  const receiptRaw = typeof receiptJson === 'string' ? receiptJson : '';
+  const receiptEncoded = receiptRaw ? encodeRobokassaFormFieldValue('Receipt', receiptRaw) : '';
+
+  const signatureBase = buildRobokassaSignatureBase({
+    parts: receiptEncoded
+      ? [cfg.merchantLogin, sum, String(invId), receiptEncoded, cfg.password1]
+      : [cfg.merchantLogin, sum, String(invId), cfg.password1],
+    shpParams,
+  });
+  const signatureValue = md5Upper(signatureBase);
+
+  const fields = [
+    ['MerchantLogin', cfg.merchantLogin],
+    ['OutSum', sum],
+    ['InvId', String(invId)],
+    ['Description', String(description ?? '')],
+    ['SignatureValue', signatureValue],
+    ['Culture', 'ru'],
+    ['Encoding', 'utf-8'],
+  ];
+
+  if (receiptRaw) fields.push(['Receipt', receiptRaw]);
+  if (cfg.isTest) fields.push(['IsTest', '1']);
+  if (typeof email === 'string' && email.trim()) fields.push(['Email', email.trim()]);
+
+  if (shpParams && typeof shpParams === 'object') {
+    for (const [k, v] of Object.entries(shpParams)) {
+      if (typeof v === 'string' && v.trim()) {
+        fields.push([k, v.trim()]);
+      }
+    }
+  }
+
+  const inputsHtml = fields
+    .map(([k, v]) => `<input type="hidden" name="${escapeHtmlAttribute(k)}" value="${escapeHtmlAttribute(v)}" />`)
+    .join('');
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Переадресация на оплату</title>
+  </head>
+  <body>
+    <form id="pay" method="POST" action="${escapeHtmlAttribute(cfg.baseUrl)}">
+      ${inputsHtml}
+      <noscript>
+        <button type="submit">Перейти к оплате</button>
+      </noscript>
+    </form>
+    <script>
+      document.getElementById('pay').submit();
+    </script>
+  </body>
+</html>`;
+}
+
 function verifyRobokassaResultSignature({ outSum, invId, signatureValue, shpParams }) {
   const cfg = getRobokassaConfig();
   const sum = normalizeRobokassaOutSum(outSum);
@@ -4090,20 +4224,7 @@ app.post('/api/pay', requireAuth(requireCsrf(async (req, res) => {
       throw err;
     }
 
-    const shpParams = {
-      Shp_scanId: scanId || '',
-      Shp_analysisId: analysisId || '',
-      Shp_shareId: scanForPay?.shareId ? String(scanForPay.shareId) : '',
-      Shp_userId: String(req.auth.userId),
-    };
-    const confirmationUrl = buildRobokassaPaymentUrl({
-      invId,
-      outSum: FULL_ANALYSIS_PRICE_RUB,
-      description,
-      shpParams,
-    });
-
-    res.json({ confirmation_url: confirmationUrl });
+    res.json({ confirmation_url: `/api/payment/robokassa/pay/${invId}` });
     return;
   }
 
@@ -4219,17 +4340,7 @@ app.post(
         throw err;
       }
 
-      const shpParams = {
-        Shp_analysisId: analysisId,
-        Shp_userId: String(req.auth.userId),
-      };
-      const confirmationUrl = buildRobokassaPaymentUrl({
-        invId,
-        outSum: FULL_ANALYSIS_PRICE_RUB,
-        description,
-        shpParams,
-      });
-
+      const confirmationUrl = `/api/payment/robokassa/pay/${invId}`;
       res.json({ confirmationUrl, confirmation_url: confirmationUrl });
       return;
     }
@@ -4510,6 +4621,85 @@ app.get('/api/payment/webhook/robokassa', ...robokassaWebhookMiddleware);
 app.post('/api/payment/webhook/robokassa', ...robokassaWebhookMiddleware);
 app.get('/api/payment/webhook/robokassa/:token', ...robokassaWebhookMiddleware);
 app.post('/api/payment/webhook/robokassa/:token', ...robokassaWebhookMiddleware);
+
+app.get('/api/payment/robokassa/pay/:invId', requireAuth(async (req, res, next) => {
+  try {
+    const invIdRaw = typeof req.params?.invId === 'string' ? req.params.invId.trim() : '';
+    const invIdNum = /^\d+$/.test(invIdRaw) ? Number(invIdRaw) : NaN;
+    if (!Number.isFinite(invIdNum) || invIdNum < 0) {
+      const err = new Error('Не удалось определить InvId');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prisma = getPrismaClient();
+    const paymentId = `robokassa:${invIdNum}`;
+    const evt = await prisma.paymentWebhookEvent.findUnique({ where: { paymentId } });
+    if (!evt) {
+      const err = new Error('Платёж не найден');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const payload = typeof evt.payload === 'object' && evt.payload !== null ? evt.payload : {};
+    const provider = typeof payload.provider === 'string' ? payload.provider : '';
+    if (provider !== 'robokassa') {
+      const err = new Error('Платёж не найден');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const userId = typeof payload.userId === 'string' ? payload.userId.trim() : '';
+    if (!userId || userId !== String(req.auth.userId)) {
+      const err = new Error('Платёж не найден');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const returnUrl = typeof payload.returnUrl === 'string' ? payload.returnUrl.trim() : '';
+    if (evt.event !== 'payment.created') {
+      res.redirect(302, returnUrl || getPaymentReturnUrl());
+      return;
+    }
+
+    const outSum = typeof payload.outSum === 'string' ? payload.outSum.trim() : FULL_ANALYSIS_PRICE_RUB;
+    const normalizedSum = normalizeRobokassaOutSum(outSum);
+    if (!normalizedSum || normalizedSum !== FULL_ANALYSIS_PRICE_RUB) {
+      const err = new Error('Некорректная сумма');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const scanId = typeof payload.scanId === 'string' ? payload.scanId.trim() : '';
+    const analysisId = typeof payload.analysisId === 'string' ? payload.analysisId.trim() : '';
+
+    let shareId = '';
+    if (scanId) {
+      const scan = await prisma.scan.findFirst({ where: { id: scanId, userId: req.auth.userId } });
+      shareId = scan?.shareId ? String(scan.shareId) : '';
+    }
+
+    const receiptJson = buildRobokassaReceiptJson({ outSum: normalizedSum });
+    const description = 'Оплата полного разбора';
+    const shpParams = {
+      Shp_scanId: scanId || '',
+      Shp_analysisId: analysisId || '',
+      Shp_shareId: shareId || '',
+      Shp_userId: String(req.auth.userId),
+    };
+    const html = buildRobokassaPaymentFormHtml({
+      invId: invIdNum,
+      outSum: normalizedSum,
+      description,
+      shpParams,
+      receiptJson,
+    });
+
+    res.status(200).setHeader('Cache-Control', 'no-store').type('text/html; charset=utf-8').send(html);
+  } catch (err) {
+    next(err);
+  }
+}));
 
 app.get('/api/payment/robokassa/success', async (req, res, next) => {
   try {
