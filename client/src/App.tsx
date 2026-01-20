@@ -22,7 +22,16 @@ type ScanResponse = {
 type AuthUser = {
   id: string;
   label: string;
+  email?: string | null;
 };
+
+function normalizeEmailClient(raw: string) {
+  const v = raw.trim().toLowerCase();
+  if (!v) return '';
+  if (v.length > 254) return '';
+  if (!/^\S+@\S+\.\S+$/.test(v)) return '';
+  return v;
+}
 
 type CsrfResponse = {
   csrfToken?: string;
@@ -962,11 +971,94 @@ function DeleteConfirmModal({
   );
 }
 
+function EmailForReceiptModal({
+  open,
+  initialEmail,
+  onClose,
+  onSubmit,
+}: {
+  open: boolean;
+  initialEmail: string;
+  onClose: () => void;
+  onSubmit: (email: string) => void;
+}) {
+  const [value, setValue] = useState(initialEmail);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (open) {
+      setValue(initialEmail);
+      setError('');
+    }
+  }, [open, initialEmail]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-40 grid place-items-center p-4">
+      <button
+        type="button"
+        aria-label="Закрыть"
+        onClick={onClose}
+        className="absolute inset-0 bg-slate-950/70 backdrop-blur"
+      />
+      <div className="relative z-10 w-full max-w-lg overflow-hidden rounded-3xl border border-white/10 bg-deep-bg/90 p-6 shadow-[0_0_80px_rgba(0,0,0,0.55)] backdrop-blur sm:p-8">
+        <div className="grid gap-4">
+          <div className="text-2xl font-black tracking-tight text-white">Email для чека</div>
+          <div className="text-sm leading-relaxed text-white/80">
+            Robokassa формирует электронный чек по номенклатуре. Укажи email — он нужен для отправки чека.
+          </div>
+
+          <div className="grid gap-2">
+            <input
+              value={value}
+              onChange={(e) => {
+                setValue(e.target.value);
+                setError('');
+              }}
+              inputMode="email"
+              autoComplete="email"
+              placeholder="name@example.com"
+              className="w-full rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-4 text-sm text-white outline-none placeholder:text-slate-500 focus:border-red-500/60 focus:ring-4 focus:ring-red-500/10"
+            />
+            {error ? <div className="text-xs font-semibold tracking-wide text-red-300">{error}</div> : null}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-6 py-4 text-sm font-black uppercase tracking-wide text-white/90 transition hover:bg-white/10 active:bg-white/5"
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const normalized = normalizeEmailClient(value);
+                if (!normalized) {
+                  setError('Введи корректный email');
+                  return;
+                }
+                onSubmit(normalized);
+              }}
+              className="neon-shadow w-full rounded-2xl bg-neon-red px-6 py-4 text-sm font-black uppercase tracking-wide text-white transition hover:brightness-110 active:brightness-95"
+            >
+              Продолжить оплату
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const heroTitle = useMemo(() => HERO_TITLES[getRandomIndex(HERO_TITLES.length)] ?? HERO_TITLES[0], []);
   const [text, setText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
   const [isOcrLoading, setIsOcrLoading] = useState(false);
   const [isScanLoading, setIsScanLoading] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
@@ -1597,17 +1689,17 @@ export default function App() {
     }
   }
 
-  async function handlePayment() {
+  async function startPayment(email?: string) {
     if (isPaying) return;
 
-    if (!authUser) {
+    const id = scanResult?.id;
+    if (!id) {
       showToast({
         id: crypto.randomUUID(),
         tone: 'danger',
-        title: 'Нужна авторизация',
-        message: 'Войди через Telegram, чтобы оплатить и открыть полный отчёт.',
+        title: 'Не удалось открыть оплату',
+        message: 'Попробуй ещё раз или обнови страницу.',
       });
-      setAuthPanelOpen(true);
       return;
     }
 
@@ -1615,7 +1707,8 @@ export default function App() {
       setIsPaying(true);
       await ensureCsrfToken();
       const response = await axios.post<{ confirmation_url: string }>('/api/pay', {
-        scanId: scanResult?.id ?? undefined,
+        scanId: id,
+        email,
       });
 
       const confirmationUrl = response.data?.confirmation_url;
@@ -1629,7 +1722,13 @@ export default function App() {
       }
 
       window.location.href = confirmationUrl;
-    } catch {
+    } catch (e) {
+      const status = axios.isAxiosError(e) ? e.response?.status : null;
+      if (status === 428 && !email) {
+        setEmailModalOpen(true);
+        return;
+      }
+
       showToast({
         id: crypto.randomUUID(),
         tone: 'danger',
@@ -1638,6 +1737,21 @@ export default function App() {
     } finally {
       setIsPaying(false);
     }
+  }
+
+  async function handlePayment() {
+    if (!authUser) {
+      showToast({
+        id: crypto.randomUUID(),
+        tone: 'danger',
+        title: 'Нужна авторизация',
+        message: 'Войди через Telegram, чтобы оплатить и открыть полный отчёт.',
+      });
+      setAuthPanelOpen(true);
+      return;
+    }
+
+    await startPayment();
   }
 
   async function handleShare() {
@@ -1899,6 +2013,16 @@ export default function App() {
       </Helmet>
       <Toast toast={toast} onClose={() => setToast(null)} />
       <ThankYouModal open={thankYouOpen} onClose={() => setThankYouOpen(false)} />
+      <EmailForReceiptModal
+        open={emailModalOpen}
+        initialEmail={authUser?.email ?? ''}
+        onClose={() => setEmailModalOpen(false)}
+        onSubmit={(email) => {
+          setEmailModalOpen(false);
+          setAuthUser((u) => (u ? { ...u, email } : u));
+          void startPayment(email);
+        }}
+      />
       <DeleteConfirmModal
         open={deleteConfirmOpen}
         onClose={() => setDeleteConfirmOpen(false)}

@@ -267,6 +267,12 @@ function encodeRobokassaFormFieldValue(name, value) {
   return s.startsWith(prefix) ? s.slice(prefix.length) : encodeURIComponent(String(value ?? '')).replaceAll('%20', '+');
 }
 
+function encodeRobokassaReceiptForSignature(receiptJson) {
+  const raw = typeof receiptJson === 'string' ? receiptJson : '';
+  if (!raw.trim()) return '';
+  return encodeURIComponent(raw);
+}
+
 function getRobokassaReceiptConfig() {
   const itemName =
     (typeof process.env.ROBOKASSA_RECEIPT_ITEM_NAME === 'string' ? process.env.ROBOKASSA_RECEIPT_ITEM_NAME.trim() : '') ||
@@ -326,11 +332,11 @@ function buildRobokassaPaymentFormHtml({ invId, outSum, description, shpParams, 
   }
 
   const receiptRaw = typeof receiptJson === 'string' ? receiptJson : '';
-  const receiptEncoded = receiptRaw ? encodeRobokassaFormFieldValue('Receipt', receiptRaw) : '';
+  const receiptEncodedForSignature = receiptRaw ? encodeRobokassaFormFieldValue('Receipt', receiptRaw) : '';
 
   const signatureBase = buildRobokassaSignatureBase({
-    parts: receiptEncoded
-      ? [cfg.merchantLogin, sum, String(invId), receiptEncoded, cfg.password1]
+    parts: receiptEncodedForSignature
+      ? [cfg.merchantLogin, sum, String(invId), receiptEncodedForSignature, cfg.password1]
       : [cfg.merchantLogin, sum, String(invId), cfg.password1],
     shpParams,
   });
@@ -415,6 +421,18 @@ function verifyRobokassaResultSignature({ outSum, invId, signatureValue, shpPara
       ),
     );
 
+    const receiptAsSignatureEncoded = encodeRobokassaReceiptForSignature(receiptTrimmed);
+    if (receiptAsSignatureEncoded && receiptAsSignatureEncoded !== receiptTrimmed) {
+      candidates.push(
+        md5Upper(
+          buildRobokassaSignatureBase({
+            parts: [sum, String(invId), receiptAsSignatureEncoded, cfg.password2],
+            shpParams,
+          }),
+        ),
+      );
+    }
+
     const receiptAsEncoded = encodeRobokassaFormFieldValue('Receipt', receiptTrimmed);
     if (receiptAsEncoded && receiptAsEncoded !== receiptTrimmed) {
       candidates.push(
@@ -467,6 +485,18 @@ function verifyRobokassaSuccessSignature({ outSum, invId, signatureValue, shpPar
         }),
       ),
     );
+
+    const receiptAsSignatureEncoded = encodeRobokassaReceiptForSignature(receiptTrimmed);
+    if (receiptAsSignatureEncoded && receiptAsSignatureEncoded !== receiptTrimmed) {
+      candidates.push(
+        md5Upper(
+          buildRobokassaSignatureBase({
+            parts: [sum, String(invId), receiptAsSignatureEncoded, cfg.password1],
+            shpParams,
+          }),
+        ),
+      );
+    }
 
     const receiptAsEncoded = encodeRobokassaFormFieldValue('Receipt', receiptTrimmed);
     if (receiptAsEncoded && receiptAsEncoded !== receiptTrimmed) {
@@ -1762,9 +1792,7 @@ function verifyWebhookRequestOptionalToken(req) {
 
   if (expectedToken) {
     const tokenFromPath = typeof req.params?.token === 'string' ? req.params.token.trim() : '';
-    const tokenFromQuery = typeof req.query?.token === 'string' ? req.query.token.trim() : '';
-    const got = tokenFromPath || tokenFromQuery;
-    if (got && got !== expectedToken) {
+    if (tokenFromPath && tokenFromPath !== expectedToken) {
       const err = new Error('Webhook: недействительный токен');
       err.statusCode = 403;
       throw err;
@@ -2548,7 +2576,7 @@ app.get('/api/auth/me', authLimiter, async (req, res, next) => {
       res.json({ user: null });
       return;
     }
-    res.json({ user: { id: ctx.user.id, label: buildUserLabel(ctx.user) } });
+    res.json({ user: { id: ctx.user.id, label: buildUserLabel(ctx.user), email: ctx.user.email ?? null } });
   } catch (err) {
     next(err);
   }
@@ -4236,6 +4264,11 @@ app.post(
 app.post('/api/pay', requireAuth(requireCsrf(async (req, res) => {
   const scanId = typeof req.body?.scanId === 'string' ? req.body.scanId.trim() : '';
   const analysisId = typeof req.body?.analysisId === 'string' ? req.body.analysisId.trim() : '';
+  const emailRaw = typeof req.body?.email === 'string' ? req.body.email : '';
+  const email = emailRaw ? normalizeEmail(emailRaw) : '';
+
+  const emailFromAuth = typeof req.auth?.email === 'string' ? normalizeEmail(req.auth.email) : '';
+  const effectiveEmail = email || emailFromAuth;
 
     if (!scanId && !analysisId) {
       const err = new Error('Нужно передать scanId или analysisId');
@@ -4243,8 +4276,31 @@ app.post('/api/pay', requireAuth(requireCsrf(async (req, res) => {
       throw err;
     }
 
+  if (emailRaw && !email) {
+    const err = new Error('Некорректный email');
+    err.statusCode = 400;
+    throw err;
+  }
+
   const prisma = getPrismaClient();
   let scanForPay = null;
+
+  if (email) {
+    try {
+      await prisma.user.update({
+        where: { id: req.auth.userId },
+        data: { email },
+      });
+    } catch (e) {
+      const msg = String(e?.message ?? '');
+      if (msg.includes('Unique constraint') || msg.includes('users_email_key') || msg.includes('email')) {
+        const err = new Error('Этот email уже используется');
+        err.statusCode = 409;
+        throw err;
+      }
+      throw e;
+    }
+  }
 
   if (scanId) {
     const scan = await prisma.scan.findFirst({ where: { id: scanId, userId: req.auth.userId } });
@@ -4285,6 +4341,11 @@ app.post('/api/pay', requireAuth(requireCsrf(async (req, res) => {
   const provider = getPaymentProvider();
 
   if (provider === 'robokassa') {
+    if (!effectiveEmail) {
+      const err = new Error('Нужен email для отправки чека');
+      err.statusCode = 428;
+      throw err;
+    }
     let invId = null;
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const candidate = crypto.randomInt(1, 2147483647);
@@ -4301,6 +4362,7 @@ app.post('/api/pay', requireAuth(requireCsrf(async (req, res) => {
               scanId: scanId || null,
               analysisId: analysisId || null,
               userId: req.auth.userId,
+              email: effectiveEmail || null,
               returnUrl,
             },
             lastTriedAt: now,
@@ -4382,6 +4444,17 @@ app.post(
       throw err;
     }
 
+    const emailRaw = typeof req.body?.email === 'string' ? req.body.email : '';
+    const email = emailRaw ? normalizeEmail(emailRaw) : '';
+    if (emailRaw && !email) {
+      const err = new Error('Некорректный email');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const emailFromAuth = typeof req.auth?.email === 'string' ? normalizeEmail(req.auth.email) : '';
+    const effectiveEmail = email || emailFromAuth;
+
     const prisma = getPrismaClient();
     const analysis = await prisma.analysis.findFirst({ where: { id: analysisId, userId: req.auth.userId } });
     if (!analysis) {
@@ -4402,6 +4475,28 @@ app.post(
     const provider = getPaymentProvider();
 
     if (provider === 'robokassa') {
+      if (email) {
+        try {
+          await prisma.user.update({
+            where: { id: req.auth.userId },
+            data: { email },
+          });
+        } catch (e) {
+          const msg = String(e?.message ?? '');
+          if (msg.includes('Unique constraint') || msg.includes('users_email_key') || msg.includes('email')) {
+            const err = new Error('Этот email уже используется');
+            err.statusCode = 409;
+            throw err;
+          }
+          throw e;
+        }
+      }
+
+      if (!effectiveEmail) {
+        const err = new Error('Нужен email для отправки чека');
+        err.statusCode = 428;
+        throw err;
+      }
       let invId = null;
       for (let attempt = 0; attempt < 8; attempt += 1) {
         const candidate = crypto.randomInt(1, 2147483647);
@@ -4417,6 +4512,7 @@ app.post(
                 outSum: FULL_ANALYSIS_PRICE_RUB,
                 analysisId,
                 userId: req.auth.userId,
+                email: effectiveEmail || null,
                 returnUrl,
               },
               lastTriedAt: now,
@@ -4770,6 +4866,14 @@ app.get('/api/payment/robokassa/pay/:invId', requireAuth(async (req, res, next) 
     const scanId = typeof payload.scanId === 'string' ? payload.scanId.trim() : '';
     const analysisId = typeof payload.analysisId === 'string' ? payload.analysisId.trim() : '';
 
+    const emailFromPayload = typeof payload.email === 'string' ? payload.email.trim() : '';
+    let email = emailFromPayload ? normalizeEmail(emailFromPayload) : '';
+    if (!email) {
+      const user = await prisma.user.findUnique({ where: { id: req.auth.userId } });
+      const emailFromUser = typeof user?.email === 'string' ? user.email : '';
+      email = emailFromUser ? normalizeEmail(emailFromUser) : '';
+    }
+
     let shareId = '';
     if (scanId) {
       const scan = await prisma.scan.findFirst({ where: { id: scanId, userId: req.auth.userId } });
@@ -4789,6 +4893,7 @@ app.get('/api/payment/robokassa/pay/:invId', requireAuth(async (req, res, next) 
       outSum: normalizedSum,
       description,
       shpParams,
+      email: email || undefined,
       receiptJson,
     });
 
