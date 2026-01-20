@@ -352,7 +352,7 @@ function buildRobokassaPaymentFormHtml({ invId, outSum, description, shpParams, 
     ['Encoding', 'utf-8'],
   ];
 
-  if (receiptRaw) fields.push(['Receipt', receiptRaw]);
+  if (receiptEncodedForSignature) fields.push(['Receipt', receiptEncodedForSignature]);
   if (cfg.isTest) fields.push(['IsTest', '1']);
   if (typeof email === 'string' && email.trim()) fields.push(['Email', email.trim()]);
 
