@@ -2243,6 +2243,7 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <a href="/privacy.html" target="_blank" rel="noreferrer" className="underline">Политика ПДн (152-ФЗ)</a>
             <a href="/offer.html" target="_blank" rel="noreferrer" className="underline">Публичная оферта</a>
+            <a href="mailto:contact@example.com" className="underline">Контакты</a>
           </div>
           <div className="mt-3">
             Самозанятый: [ФИО исполнителя] · ИНН: [ИНН исполнителя]
