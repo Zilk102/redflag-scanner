@@ -234,7 +234,13 @@ function buildRobokassaPaymentUrl({ invId, outSum, description, shpParams, email
   if (typeof email === 'string' && email.trim()) url.searchParams.set('Email', email.trim());
 
   if (shpParams && typeof shpParams === 'object') {
-    for (const [k, v] of Object.entries(shpParams)) {
+    const shpEntries = Object.entries(shpParams)
+      .filter(([, v]) => typeof v === 'string' && v.trim())
+      .map(([k, v]) => [String(k), String(v).trim()]);
+
+    shpEntries.sort(([a], [b]) => a.localeCompare(b, 'en'));
+
+    for (const [k, v] of shpEntries) {
       if (typeof v === 'string' && v.trim()) {
         url.searchParams.set(k, v.trim());
       }
@@ -345,10 +351,14 @@ function buildRobokassaPaymentFormHtml({ invId, outSum, description, shpParams, 
   if (typeof email === 'string' && email.trim()) fields.push(['Email', email.trim()]);
 
   if (shpParams && typeof shpParams === 'object') {
-    for (const [k, v] of Object.entries(shpParams)) {
-      if (typeof v === 'string' && v.trim()) {
-        fields.push([k, v.trim()]);
-      }
+    const shpEntries = Object.entries(shpParams)
+      .filter(([, v]) => typeof v === 'string' && v.trim())
+      .map(([k, v]) => [String(k), String(v).trim()]);
+
+    shpEntries.sort(([a], [b]) => a.localeCompare(b, 'en'));
+
+    for (const [k, v] of shpEntries) {
+      fields.push([k, v]);
     }
   }
 
@@ -365,7 +375,7 @@ function buildRobokassaPaymentFormHtml({ invId, outSum, description, shpParams, 
     <title>Переадресация на оплату</title>
   </head>
   <body>
-    <form id="pay" method="POST" action="${escapeHtmlAttribute(cfg.baseUrl)}">
+    <form id="pay" method="POST" accept-charset="utf-8" action="${escapeHtmlAttribute(cfg.baseUrl)}">
       ${inputsHtml}
       <noscript>
         <button type="submit">Перейти к оплате</button>
