@@ -2113,9 +2113,55 @@ function normalizeVerdict(result) {
   const rating = Number(r.rating ?? r.score);
   const shortVerdict = typeof (r.short_verdict ?? r.verdict) === 'string' ? String(r.short_verdict ?? r.verdict) : '';
   const teaser = typeof r.teaser === 'string' ? r.teaser : '';
+  const fullAnalysis = typeof (r.full_analysis ?? r.analysis) === 'string' ? String(r.full_analysis ?? r.analysis) : '';
+
+  const baseRating = Number.isFinite(rating) ? Math.max(0, Math.min(100, Math.round(rating))) : 50;
+
+  const combinedText = `${shortVerdict} ${teaser} ${fullAnalysis}`
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const positiveMarkers = [
+    'всё хорошо',
+    'все хорошо',
+    'токсичности нет',
+    'нет токсичности',
+    'красных флагов нет',
+    'ред флагов нет',
+    'в порядке',
+    'всё ок',
+    'все ок',
+    'похоже норм',
+  ];
+
+  const negativeMarkers = [
+    'срочно беги',
+    'беги',
+    'опасно',
+    'токсично',
+    'токсичн',
+    'абьюз',
+    'газлайтинг',
+    'манипуля',
+    'шантаж',
+    'контроль',
+    'обесценив',
+    'ревност',
+    'давлен',
+  ];
+
+  const hasPositive = positiveMarkers.some((m) => combinedText.includes(m));
+  const hasNegative = negativeMarkers.some((m) => combinedText.includes(m));
+
+  const fixedRating = (() => {
+    if (hasPositive && !hasNegative && baseRating >= 70) return 100 - baseRating;
+    if (hasNegative && !hasPositive && baseRating <= 30) return 100 - baseRating;
+    return baseRating;
+  })();
 
   return {
-    rating: Number.isFinite(rating) ? Math.max(0, Math.min(100, Math.round(rating))) : 50,
+    rating: fixedRating,
     short_verdict: shortVerdict.trim() || 'Похоже, тут что-то есть',
     teaser: teaser.trim() || 'Мы нашли пару странных моментов. И это только начало…',
   };
@@ -3507,7 +3553,9 @@ function renderShareCardSvg({ shareUrl, verdict, result }) {
     </g>
 
     <rect x="${cardX}" y="${cardY}" width="${cardW}" height="${cardH}" rx="34" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.10" filter="url(#shadow)" />
-    <rect x="${cardX}" y="${cardY}" width="${cardW}" height="7" rx="3.5" fill="url(#accent)" />
+    <g>
+      <rect x="${cardX}" y="${cardY}" width="${cardW}" height="7" rx="3.5" fill="url(#accent)" />
+    </g>
 
     <g clip-path="url(#clipCard)">
       <g transform="translate(${leftX} ${cardY + 44})">
@@ -3557,7 +3605,7 @@ function renderShareCardSvg({ shareUrl, verdict, result }) {
             return `
         <g transform="translate(${chipX} ${y})">
           <rect x="0" y="0" width="${chipW}" height="${chipH}" rx="18" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.10" />
-          <rect x="0" y="0" width="${chipW}" height="${chipH}" rx="18" fill="none" stroke="url(#accent)" stroke-opacity="0.32" />
+          <rect x="0" y="0" width="${chipW}" height="${chipH}" rx="18" fill="none" stroke="url(#accent)" stroke-opacity="0.18" />
           <circle cx="22" cy="${chipH / 2}" r="6" fill="url(#accent)" />
           <text x="40" y="${chipH / 2}" dominant-baseline="middle" fill="#e2e8f0" font-size="18" font-weight="700">${labelText}</text>
         </g>`;
@@ -3567,6 +3615,307 @@ function renderShareCardSvg({ shareUrl, verdict, result }) {
     </g>
 
     <g transform="translate(70 602)">
+      <text x="0" y="0" fill="#94a3b8" font-size="14" font-weight="700">Анализ переписки с помощью AI • toxiscan.ru</text>
+    </g>
+  </g>
+</svg>`;
+}
+
+function renderReportSvg({ shareUrl, verdict, result }) {
+  const width = 1200;
+  const rating = Number.isFinite(Number(verdict?.rating)) ? Math.max(0, Math.min(100, Math.round(Number(verdict.rating)))) : 50;
+  const palette = pickOgPalette(rating);
+
+  const family = 'DejaVu Sans,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial';
+  const shareDisplay = (() => {
+    const raw = String(shareUrl || '').trim();
+    if (!raw) return '';
+    let s = '';
+    try {
+      const u = new URL(raw);
+      s = `${u.host}${u.pathname || '/'}`;
+    } catch {
+      s = raw.replace(/^https?:\/\//i, '');
+    }
+    s = s.replace(/\/+$/g, '').replace(/\/{2,}/g, '/');
+    if (s.length > 56) s = `${s.slice(0, 55).trim()}…`;
+    return escapeXml(s);
+  })();
+
+  const safe = typeof result === 'object' && result !== null ? result : {};
+  const fullAnalysisRaw = typeof safe.full_analysis === 'string' ? safe.full_analysis : typeof safe.analysis === 'string' ? safe.analysis : '';
+  const adviceRaw = typeof safe.advice === 'string' ? safe.advice : '';
+  const flagsLinesRaw = extractFlagLines(safe);
+
+  const titleLines = clampSvgLines(splitTextToSvgLines(String(verdict?.short_verdict || '').trim(), 22), 2);
+  const subtitleLines = clampSvgLines(splitTextToSvgLines(String(verdict?.teaser || '').trim(), 52), 3);
+
+  function normalizeBodyLines(lines) {
+    const out = [];
+    let lastBlank = false;
+    for (const l of Array.isArray(lines) ? lines : []) {
+      const s = String(l ?? '').replace(/\u0000/g, '').trim();
+      const isBlank = !s;
+      if (isBlank) {
+        if (!lastBlank && out.length > 0) out.push('');
+        lastBlank = true;
+        continue;
+      }
+      out.push(s);
+      lastBlank = false;
+    }
+    while (out.length > 0 && out[out.length - 1] === '') out.pop();
+    return out;
+  }
+
+  function limitLines(lines, max) {
+    const lim = Number.isFinite(max) ? Math.max(1, Math.trunc(max)) : 1;
+    const src = Array.isArray(lines) ? lines : [];
+    if (src.length <= lim) return src;
+    const out = src.slice(0, lim);
+    const last = String(out[out.length - 1] || '').trim();
+    out[out.length - 1] = last ? `${last.replace(/[.\s]+$/g, '').trim()}…` : '…';
+    return out;
+  }
+
+  const sectionPad = 26;
+  const sectionTitleSize = 20;
+  const sectionTitleLine = 26;
+  const sectionBodySize = 16;
+  const sectionBodyLine = 24;
+  const maxBodyLines = 220;
+
+  const fullAnalysisLines = limitLines(
+    normalizeBodyLines(splitTextToSvgLines(String(fullAnalysisRaw || '').trim(), 74)),
+    maxBodyLines,
+  );
+  const adviceLines = limitLines(normalizeBodyLines(splitTextToSvgLines(String(adviceRaw || '').trim(), 74)), 80);
+  const flagsLines = limitLines(
+    normalizeBodyLines(flagsLinesRaw.flatMap((x) => splitTextToSvgLines(`• ${String(x || '').trim()}`, 82))),
+    120,
+  );
+
+  const cardX = 70;
+  const cardW = 1060;
+
+  const heroPad = 54;
+  const heroTitleSize = 52;
+  const heroTitleLine = 54;
+  const heroSubtitleSize = 22;
+  const heroSubtitleLine = 30;
+  const heroSignalsTitleSize = 13;
+  const heroSignalsTitleLine = 18;
+  const heroChipH = 52;
+  const heroChipGap = 12;
+
+  const heroTitleH = titleLines.length * heroTitleLine;
+  const heroSubtitleH = subtitleLines.length * heroSubtitleLine;
+  const heroSignalsTitleH = heroSignalsTitleLine;
+  const heroChipsH = 3 * heroChipH + 2 * heroChipGap;
+  const heroContentH = 44 + 74 + 196;
+
+  const heroRightTop = 44;
+  const heroRightH = heroTitleH + 14 + heroSubtitleH + 18 + heroSignalsTitleH + 26 + heroChipsH;
+  const heroLeftH = heroContentH;
+  const heroInnerH = Math.max(heroLeftH, heroRightH + heroRightTop);
+  const heroH = heroPad + heroInnerH + heroPad;
+
+  function measureSection(lines) {
+    const textH = (Array.isArray(lines) ? lines.length : 0) * sectionBodyLine;
+    return sectionPad + sectionTitleLine + 14 + textH + sectionPad;
+  }
+
+  const sectionGap = 26;
+  const headerTop = 62;
+  const startY = 110;
+
+  const fullH = measureSection(fullAnalysisLines);
+  const adviceH = measureSection(adviceLines);
+  const flagsH = measureSection(flagsLines);
+
+  const totalH = startY + heroH + sectionGap + fullH + sectionGap + adviceH + sectionGap + flagsH + 78;
+
+  const label = escapeXml(palette.label);
+
+  const signalPills = (() => {
+    const items = [];
+    const flags = typeof result === 'object' && result !== null && Array.isArray(result.flags) ? result.flags : [];
+    for (const f of flags) {
+      if (typeof f !== 'object' || f === null) continue;
+      const category = typeof f.category === 'string' ? f.category.trim() : '';
+      const quote = typeof f.quote === 'string' ? f.quote.trim().replace(/\s+/g, ' ') : '';
+      if (!category && !quote) continue;
+
+      let text = category;
+      if (quote) {
+        const q = quote.length > 64 ? `${quote.slice(0, 63).trim()}…` : quote;
+        text = category ? `${category}: «${q}»` : `«${q}»`;
+      }
+
+      text = text.replace(/\u0000/g, '').trim();
+      if (text.length > 72) text = `${text.slice(0, 71).trim()}…`;
+      if (!text) continue;
+      if (items.includes(text)) continue;
+      items.push(text);
+      if (items.length >= 3) break;
+    }
+    if (items.length === 0) items.push('Сигналов не найдено');
+    return items.map((x) => escapeXml(x));
+  })();
+
+  const heroCardY = startY;
+  const heroCardH = heroH;
+  const leftX = cardX + heroPad;
+  const rightX = cardX + 420;
+  const rightW = cardX + cardW - rightX - heroPad;
+
+  const titleY = heroCardY + heroPad + heroRightTop;
+  const subtitleY = titleY + heroTitleH + 14;
+  const signalsTitleY = subtitleY + heroSubtitleH + 18;
+  const chipsY = signalsTitleY + 26;
+
+  function renderSectionCard({ y, title, lines }) {
+    const cardH = measureSection(lines);
+    const bandH = 7;
+    const titleY = y + sectionPad;
+    const bodyY = titleY + sectionTitleLine + 14;
+    return {
+      h: cardH,
+      svg: `
+    <g>
+      <rect x="${cardX}" y="${y}" width="${cardW}" height="${cardH}" rx="28" fill="#ffffff" fill-opacity="0.96" stroke="#0f172a" stroke-opacity="0.08" filter="url(#shadow)" />
+      <rect x="${cardX}" y="${y}" width="${cardW}" height="${bandH}" rx="${bandH / 2}" fill="url(#accent)" />
+      <text x="${cardX + sectionPad}" y="${titleY}" dominant-baseline="hanging" fill="#0f172a" font-size="${sectionTitleSize}" font-weight="950" letter-spacing="0.5">${escapeXml(title)}</text>
+      ${renderSvgMultilineText({
+        x: cardX + sectionPad,
+        y: bodyY,
+        lines,
+        lineHeight: sectionBodyLine,
+        attrs: `fill="#0f172a" font-size="${sectionBodySize}" font-weight="600"`,
+      })}
+    </g>`,
+    };
+  }
+
+  const fullCard = renderSectionCard({ y: heroCardY + heroCardH + sectionGap, title: 'Полный разбор', lines: fullAnalysisLines });
+  const adviceCard = renderSectionCard({
+    y: heroCardY + heroCardH + sectionGap + fullCard.h + sectionGap,
+    title: 'Совет',
+    lines: adviceLines,
+  });
+  const flagsCard = renderSectionCard({
+    y: heroCardY + heroCardH + sectionGap + fullCard.h + sectionGap + adviceCard.h + sectionGap,
+    title: 'Красные флаги',
+    lines: flagsLines,
+  });
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalH}" viewBox="0 0 ${width} ${totalH}">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#020617" />
+      <stop offset="0.55" stop-color="#0b1226" />
+      <stop offset="1" stop-color="#020617" />
+    </linearGradient>
+    <radialGradient id="g1" cx="24%" cy="12%" r="70%">
+      <stop offset="0" stop-color="${palette.accent}" stop-opacity="0.42" />
+      <stop offset="1" stop-color="${palette.accent}" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="g2" cx="84%" cy="16%" r="70%">
+      <stop offset="0" stop-color="${palette.accent2}" stop-opacity="0.34" />
+      <stop offset="1" stop-color="${palette.accent2}" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="${palette.accent}" />
+      <stop offset="1" stop-color="${palette.accent2}" />
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1226" stop-opacity="0.78" />
+      <stop offset="1" stop-color="#0b1226" stop-opacity="0.40" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.40" />
+    </filter>
+    <clipPath id="clipHero">
+      <rect x="${cardX}" y="${heroCardY}" width="${cardW}" height="${heroCardH}" rx="34" />
+    </clipPath>
+  </defs>
+
+  <rect width="${width}" height="${totalH}" fill="url(#bg)" />
+  <rect width="${width}" height="${totalH}" fill="url(#g1)" />
+  <rect width="${width}" height="${totalH}" fill="url(#g2)" />
+
+  <g font-family="${family}">
+    <g transform="translate(70 ${headerTop})">
+      <text x="0" y="0" fill="#e2e8f0" font-size="22" font-weight="950" letter-spacing="6">REDFLAG SCANNER</text>
+      ${shareDisplay ? `<text x="0" y="28" fill="#94a3b8" font-size="13" font-weight="700">${shareDisplay}</text>` : ''}
+    </g>
+
+    <rect x="${cardX}" y="${heroCardY}" width="${cardW}" height="${heroCardH}" rx="34" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.10" filter="url(#shadow)" />
+    <rect x="${cardX}" y="${heroCardY}" width="${cardW}" height="7" rx="3.5" fill="url(#accent)" />
+
+    <g clip-path="url(#clipHero)">
+      <g transform="translate(${leftX} ${heroCardY + heroPad})">
+        <rect x="0" y="0" width="260" height="44" rx="22" fill="url(#accent)" fill-opacity="0.16" stroke="url(#accent)" stroke-opacity="0.40" />
+        <text x="130" y="22" text-anchor="middle" dominant-baseline="middle" fill="#ffffff" font-size="13" font-weight="950" letter-spacing="4">${label}</text>
+
+        <g transform="translate(0 74)">
+          <circle cx="130" cy="98" r="92" fill="#0b1226" fill-opacity="0.40" stroke="url(#accent)" stroke-opacity="0.85" stroke-width="6" />
+          <circle cx="130" cy="98" r="74" fill="#0b1226" fill-opacity="0.55" />
+          <text x="130" y="88" text-anchor="middle" dominant-baseline="middle" fill="#ffffff" font-size="78" font-weight="950">${rating}</text>
+          <text x="130" y="134" text-anchor="middle" dominant-baseline="middle" fill="#94a3b8" font-size="14" font-weight="900" letter-spacing="3">ИЗ 100</text>
+          <text x="130" y="158" text-anchor="middle" dominant-baseline="middle" fill="#94a3b8" font-size="12" font-weight="900" letter-spacing="4">РЕЙТИНГ</text>
+        </g>
+      </g>
+
+      <g transform="translate(${rightX} ${titleY})">
+        ${renderSvgMultilineText({
+          x: 0,
+          y: 0,
+          lines: titleLines,
+          lineHeight: heroTitleLine,
+          attrs: `fill="#ffffff" font-size="${heroTitleSize}" font-weight="950"`,
+        })}
+      </g>
+
+      <g transform="translate(${rightX} ${subtitleY})">
+        ${renderSvgMultilineText({
+          x: 0,
+          y: 0,
+          lines: subtitleLines,
+          lineHeight: heroSubtitleLine,
+          attrs: `fill="#cbd5e1" font-size="${heroSubtitleSize}" font-weight="650"`,
+        })}
+      </g>
+
+      <g transform="translate(${rightX} ${signalsTitleY})">
+        <text x="0" y="0" fill="#94a3b8" font-size="${heroSignalsTitleSize}" font-weight="950" letter-spacing="6">КЛЮЧЕВЫЕ СИГНАЛЫ</text>
+      </g>
+
+      <g>
+        ${signalPills
+          .slice(0, 3)
+          .map((t, idx) => {
+            const y = chipsY + idx * (heroChipH + heroChipGap);
+            const textLines = clampSvgLines(splitTextToSvgLines(t, 60), 1);
+            const labelText = textLines[0] ? escapeXml(textLines[0]) : '';
+            return `
+        <g transform="translate(${rightX} ${y})">
+          <rect x="0" y="0" width="${rightW}" height="${heroChipH}" rx="18" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.10" />
+          <rect x="0" y="0" width="${rightW}" height="${heroChipH}" rx="18" fill="none" stroke="url(#accent)" stroke-opacity="0.18" />
+          <circle cx="22" cy="${heroChipH / 2}" r="6" fill="url(#accent)" />
+          <text x="40" y="${heroChipH / 2}" dominant-baseline="middle" fill="#e2e8f0" font-size="18" font-weight="700">${labelText}</text>
+        </g>`;
+          })
+          .join('')}
+      </g>
+    </g>
+
+    ${fullCard.svg}
+    ${adviceCard.svg}
+    ${flagsCard.svg}
+
+    <g transform="translate(70 ${totalH - 38})">
       <text x="0" y="0" fill="#94a3b8" font-size="14" font-weight="700">Анализ переписки с помощью AI • toxiscan.ru</text>
     </g>
   </g>
@@ -3644,6 +3993,16 @@ function drawVerticalGradient(doc, x, y, w, h, top, bottom, steps) {
     const t = s === 1 ? 0 : i / (s - 1);
     const c = mixHex(top, bottom, t);
     doc.rect(x, y + i * band, w, band + 0.6).fill(c);
+  }
+}
+
+function drawHorizontalGradient(doc, x, y, w, h, left, right, steps) {
+  const s = Number.isFinite(steps) ? Math.max(8, Math.min(240, Math.trunc(steps))) : 120;
+  const band = w / s;
+  for (let i = 0; i < s; i += 1) {
+    const t = s === 1 ? 0 : i / (s - 1);
+    const c = mixHex(left, right, t);
+    doc.rect(x + i * band, y, band + 0.6, h).fill(c);
   }
 }
 
@@ -3738,11 +4097,16 @@ function writePdfBoxSection(doc, title, body, fonts, palette) {
   ensureSpace(doc, total + 14);
 
   const y = doc.y;
+  const bandH = 7;
   doc.save();
   doc.fillColor('#ffffff').roundedRect(x, y, w, total, 16).fill();
   doc.strokeColor(palette.accent2).opacity(0.20).lineWidth(1).roundedRect(x, y, w, total, 16).stroke();
   doc.opacity(1);
-  doc.fillColor(palette.accent).roundedRect(x, y, 6, total, 3).fill();
+  doc.restore();
+
+  doc.save();
+  doc.roundedRect(x, y, w, bandH, Math.floor(bandH / 2)).clip();
+  drawHorizontalGradient(doc, x, y, w, bandH, palette.accent, palette.accent2, 120);
   doc.restore();
 
   doc.fillColor('#0f172a').font(fonts.bold).fontSize(13);
@@ -3775,11 +4139,16 @@ function writePdfBoxList(doc, title, items, fonts, palette) {
   ensureSpace(doc, total + 14);
 
   const y = doc.y;
+  const bandH = 7;
   doc.save();
   doc.fillColor('#ffffff').roundedRect(x, y, w, total, 16).fill();
   doc.strokeColor(palette.accent2).opacity(0.20).lineWidth(1).roundedRect(x, y, w, total, 16).stroke();
   doc.opacity(1);
-  doc.fillColor(palette.accent).roundedRect(x, y, 6, total, 3).fill();
+  doc.restore();
+
+  doc.save();
+  doc.roundedRect(x, y, w, bandH, Math.floor(bandH / 2)).clip();
+  drawHorizontalGradient(doc, x, y, w, bandH, palette.accent, palette.accent2, 120);
   doc.restore();
 
   doc.fillColor('#0f172a').font(fonts.bold).fontSize(13);
@@ -3840,14 +4209,18 @@ app.get('/api/scan/public/:token.png', async (req, res, next) => {
     const verdict = normalizeVerdict(scan.result);
     const baseUrl = getBaseUrl(req);
     const shareUrl = `${baseUrl}/r/${encodeURIComponent(scan.shareId)}`;
-    const svg = renderShareCardSvg({ shareUrl, verdict, result: scan.result });
+    const mode = typeof req.query?.mode === 'string' ? req.query.mode.trim().toLowerCase() : '';
+    const full = mode === 'full' || mode === 'report' || (typeof req.query?.full === 'string' && req.query.full.trim() === '1');
+    const svg = full
+      ? renderReportSvg({ shareUrl, verdict, result: scan.result })
+      : renderShareCardSvg({ shareUrl, verdict, result: scan.result });
     const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: 1200 } });
     const png = resvg.render().asPng();
 
     res
       .status(200)
       .setHeader('Content-Type', 'image/png')
-      .setHeader('Content-Disposition', `attachment; filename="redflag-card-${scan.shareId}.png"`)
+      .setHeader('Content-Disposition', `attachment; filename="${full ? 'redflag-report' : 'redflag-card'}-${scan.shareId}.png"`)
       .setHeader('Cache-Control', 'no-store')
       .send(png);
   } catch (err) {

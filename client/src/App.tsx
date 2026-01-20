@@ -1855,13 +1855,13 @@ export default function App() {
     const id = scanResult?.shareId;
     if (!id) return;
     try {
-      const response = await fetch(`/api/scan/public/${encodeURIComponent(id)}.png`, { cache: 'no-store' });
+      const response = await fetch(`/api/scan/public/${encodeURIComponent(id)}.png?mode=full`, { cache: 'no-store' });
       if (!response.ok) throw new Error('fetch_failed');
       const pngBlob = await response.blob();
       const href = URL.createObjectURL(pngBlob);
       const a = document.createElement('a');
       a.href = href;
-      a.download = `redflag-card-${id}.png`;
+      a.download = `redflag-report-${id}.png`;
       document.body.appendChild(a);
       a.click();
       a.remove();
