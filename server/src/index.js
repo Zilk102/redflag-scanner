@@ -340,7 +340,7 @@ function buildRobokassaPaymentFormHtml({ invId, outSum, description, shpParams, 
     ['Encoding', 'utf-8'],
   ];
 
-  if (receiptRaw) fields.push(['Receipt', receiptRaw]);
+  if (receiptRaw) fields.push(['Receipt', receiptEncoded]);
   if (cfg.isTest) fields.push(['IsTest', '1']);
   if (typeof email === 'string' && email.trim()) fields.push(['Email', email.trim()]);
 
@@ -378,50 +378,84 @@ function buildRobokassaPaymentFormHtml({ invId, outSum, description, shpParams, 
 </html>`;
 }
 
-function verifyRobokassaResultSignature({ outSum, invId, signatureValue, shpParams }) {
+function verifyRobokassaResultSignature({ outSum, invId, signatureValue, shpParams, receipt }) {
   const cfg = getRobokassaConfig();
   const sum = normalizeRobokassaOutSum(outSum);
   if (!sum) return false;
   const got = typeof signatureValue === 'string' ? signatureValue.trim().toUpperCase() : '';
   if (!got) return false;
 
-  const signatureBase = buildRobokassaSignatureBase({
-    parts: [sum, String(invId), cfg.password2],
-    shpParams,
-  });
-  const expected = md5Upper(signatureBase);
-
-  try {
-    const a = Buffer.from(got, 'utf8');
-    const b = Buffer.from(expected, 'utf8');
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
+  const candidates = [];
+  candidates.push(
+    md5Upper(
+      buildRobokassaSignatureBase({
+        parts: [sum, String(invId), cfg.password2],
+        shpParams,
+      }),
+    ),
+  );
+  if (typeof receipt === 'string' && receipt.trim()) {
+    candidates.push(
+      md5Upper(
+        buildRobokassaSignatureBase({
+          parts: [sum, String(invId), receipt.trim(), cfg.password2],
+          shpParams,
+        }),
+      ),
+    );
   }
+
+  for (const expected of candidates) {
+    try {
+      const a = Buffer.from(got, 'utf8');
+      const b = Buffer.from(expected, 'utf8');
+      if (a.length !== b.length) continue;
+      if (crypto.timingSafeEqual(a, b)) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
-function verifyRobokassaSuccessSignature({ outSum, invId, signatureValue, shpParams }) {
+function verifyRobokassaSuccessSignature({ outSum, invId, signatureValue, shpParams, receipt }) {
   const cfg = getRobokassaConfig();
   const sum = normalizeRobokassaOutSum(outSum);
   if (!sum) return false;
   const got = typeof signatureValue === 'string' ? signatureValue.trim().toUpperCase() : '';
   if (!got) return false;
 
-  const signatureBase = buildRobokassaSignatureBase({
-    parts: [sum, String(invId), cfg.password1],
-    shpParams,
-  });
-  const expected = md5Upper(signatureBase);
-
-  try {
-    const a = Buffer.from(got, 'utf8');
-    const b = Buffer.from(expected, 'utf8');
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
+  const candidates = [];
+  candidates.push(
+    md5Upper(
+      buildRobokassaSignatureBase({
+        parts: [sum, String(invId), cfg.password1],
+        shpParams,
+      }),
+    ),
+  );
+  if (typeof receipt === 'string' && receipt.trim()) {
+    candidates.push(
+      md5Upper(
+        buildRobokassaSignatureBase({
+          parts: [sum, String(invId), receipt.trim(), cfg.password1],
+          shpParams,
+        }),
+      ),
+    );
   }
+
+  for (const expected of candidates) {
+    try {
+      const a = Buffer.from(got, 'utf8');
+      const b = Buffer.from(expected, 'utf8');
+      if (a.length !== b.length) continue;
+      if (crypto.timingSafeEqual(a, b)) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 function ensureDatabaseUrl() {
@@ -4520,6 +4554,7 @@ const robokassaResultHandler = async (req, res, next) => {
       outSum,
       invId: invIdNum,
       signatureValue,
+      receipt: typeof payload.Receipt === 'string' ? payload.Receipt : '',
       shpParams: {
         Shp_analysisId: analysisId || '',
         Shp_scanId: scanId || '',
@@ -4722,6 +4757,7 @@ app.get('/api/payment/robokassa/success', async (req, res, next) => {
       outSum,
       invId: invIdNum,
       signatureValue,
+      receipt: typeof q.Receipt === 'string' ? q.Receipt : '',
       shpParams: {
         Shp_analysisId: analysisId || '',
         Shp_scanId: scanId || '',
