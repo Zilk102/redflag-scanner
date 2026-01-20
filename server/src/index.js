@@ -340,7 +340,7 @@ function buildRobokassaPaymentFormHtml({ invId, outSum, description, shpParams, 
     ['Encoding', 'utf-8'],
   ];
 
-  if (receiptRaw) fields.push(['Receipt', receiptEncoded]);
+  if (receiptRaw) fields.push(['Receipt', receiptRaw]);
   if (cfg.isTest) fields.push(['IsTest', '1']);
   if (typeof email === 'string' && email.trim()) fields.push(['Email', email.trim()]);
 
@@ -395,14 +395,27 @@ function verifyRobokassaResultSignature({ outSum, invId, signatureValue, shpPara
     ),
   );
   if (typeof receipt === 'string' && receipt.trim()) {
+    const receiptTrimmed = receipt.trim();
     candidates.push(
       md5Upper(
         buildRobokassaSignatureBase({
-          parts: [sum, String(invId), receipt.trim(), cfg.password2],
+          parts: [sum, String(invId), receiptTrimmed, cfg.password2],
           shpParams,
         }),
       ),
     );
+
+    const receiptAsEncoded = encodeRobokassaFormFieldValue('Receipt', receiptTrimmed);
+    if (receiptAsEncoded && receiptAsEncoded !== receiptTrimmed) {
+      candidates.push(
+        md5Upper(
+          buildRobokassaSignatureBase({
+            parts: [sum, String(invId), receiptAsEncoded, cfg.password2],
+            shpParams,
+          }),
+        ),
+      );
+    }
   }
 
   for (const expected of candidates) {
@@ -435,14 +448,27 @@ function verifyRobokassaSuccessSignature({ outSum, invId, signatureValue, shpPar
     ),
   );
   if (typeof receipt === 'string' && receipt.trim()) {
+    const receiptTrimmed = receipt.trim();
     candidates.push(
       md5Upper(
         buildRobokassaSignatureBase({
-          parts: [sum, String(invId), receipt.trim(), cfg.password1],
+          parts: [sum, String(invId), receiptTrimmed, cfg.password1],
           shpParams,
         }),
       ),
     );
+
+    const receiptAsEncoded = encodeRobokassaFormFieldValue('Receipt', receiptTrimmed);
+    if (receiptAsEncoded && receiptAsEncoded !== receiptTrimmed) {
+      candidates.push(
+        md5Upper(
+          buildRobokassaSignatureBase({
+            parts: [sum, String(invId), receiptAsEncoded, cfg.password1],
+            shpParams,
+          }),
+        ),
+      );
+    }
   }
 
   for (const expected of candidates) {
@@ -1703,6 +1729,32 @@ function verifyWebhookRequest(req) {
     const tokenFromQuery = typeof req.query?.token === 'string' ? req.query.token.trim() : '';
     const got = tokenFromPath || tokenFromQuery;
     if (!got || got !== expectedToken) {
+      const err = new Error('Webhook: недействительный токен');
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+
+  if (allowedCidrs.length > 0) {
+    const ip = getRequestIp(req);
+    const ok = allowedCidrs.some((cidr) => isIpInCidr(ip, cidr));
+    if (!ok) {
+      const err = new Error('Webhook: запрещённый IP');
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+}
+
+function verifyWebhookRequestOptionalToken(req) {
+  const expectedToken = typeof process.env.PAYMENT_WEBHOOK_TOKEN === 'string' ? process.env.PAYMENT_WEBHOOK_TOKEN.trim() : '';
+  const allowedCidrs = parseAllowedCidrs(process.env.PAYMENT_WEBHOOK_ALLOWED_CIDRS);
+
+  if (expectedToken) {
+    const tokenFromPath = typeof req.params?.token === 'string' ? req.params.token.trim() : '';
+    const tokenFromQuery = typeof req.query?.token === 'string' ? req.query.token.trim() : '';
+    const got = tokenFromPath || tokenFromQuery;
+    if (got && got !== expectedToken) {
       const err = new Error('Webhook: недействительный токен');
       err.statusCode = 403;
       throw err;
@@ -4528,7 +4580,7 @@ const yookassaWebhookHandler = async (req, res, next) => {
 
 const robokassaResultHandler = async (req, res, next) => {
   try {
-    verifyWebhookRequest(req);
+    verifyWebhookRequestOptionalToken(req);
 
     const payload = {
       ...(typeof req.query === 'object' && req.query !== null ? req.query : {}),
@@ -4768,6 +4820,61 @@ app.get('/api/payment/robokassa/success', async (req, res, next) => {
       const err = new Error('Redirect: неверная подпись');
       err.statusCode = 403;
       throw err;
+    }
+
+    const normalizedSum = normalizeRobokassaOutSum(outSum);
+    if (!normalizedSum || normalizedSum !== FULL_ANALYSIS_PRICE_RUB) {
+      const err = new Error('Redirect: неподходящая сумма');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const prisma = getPrismaClient();
+    const now = new Date();
+    const paymentId = `robokassa:${invIdNum}`;
+
+    const webhook = await prisma.paymentWebhookEvent.upsert({
+      where: { paymentId },
+      create: {
+        paymentId,
+        event: 'payment.succeeded',
+        payload: q,
+        lastTriedAt: now,
+        attempts: 1,
+      },
+      update: {
+        event: 'payment.succeeded',
+        payload: q,
+        lastTriedAt: now,
+        attempts: { increment: 1 },
+      },
+    });
+
+    if (!webhook?.processedAt) {
+      if (analysisId) {
+        await prisma.analysis.updateMany({
+          where: {
+            id: analysisId,
+            isPaid: false,
+          },
+          data: { isPaid: true },
+        });
+      }
+
+      if (scanId) {
+        await prisma.scan.updateMany({
+          where: {
+            id: scanId,
+            isPaid: false,
+          },
+          data: { isPaid: true },
+        });
+      }
+
+      await prisma.paymentWebhookEvent.update({
+        where: { paymentId },
+        data: { processedAt: new Date(), lastError: null },
+      });
     }
 
     const redirectUrl = buildPaymentReturnUrl({
