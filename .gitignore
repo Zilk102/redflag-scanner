@@ -16,3 +16,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+*.tsbuildinfo
+client/vite.config.js
+client/vite.config.d.ts
+client/vite.tmp.config.ts
+client/public/yandex_*.html

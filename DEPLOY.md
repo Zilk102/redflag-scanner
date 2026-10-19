@@ -44,7 +44,7 @@ newgrp docker
 
 ### 1.3 (Опционально) Docker Compose v1 для `deploy.sh`
 
-В проекте есть скрипт [deploy.sh](file:///D:/PROJECT/project1/deploy.sh), который вызывает `docker-compose` (v1). Если хочешь запускать именно его без правок — установи `docker-compose`.
+В проекте есть скрипт [deploy.sh](./deploy.sh), который вызывает `docker-compose` (v1). Если хочешь запускать именно его без правок — установи `docker-compose`.
 
 Вариант через GitHub releases (пример):
 

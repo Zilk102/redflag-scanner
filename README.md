@@ -1,209 +1,91 @@
-
 # RedFlag Scanner
 
-RedFlag Scanner — веб‑приложение для анализа переписок с помощью YandexGPT: выявляет токсичные паттерны и «красные флаги», показывает рейтинг риска, формирует развёрнутый разбор, генерирует превью для шаринга и PDF‑отчёт.
+**English** · [Русский](README.ru.md)
 
-## Что умеет
+**A web app that reads a chat conversation and flags toxic patterns: gaslighting, control, devaluation, silent treatment, blackmail. It returns a 0–100 risk score, a verdict, the flagged quotes and what to reply.**
+Powered by YandexGPT, with Telegram login, a paid full report, shareable links and PDF export.
 
-- AI‑анализ переписки: рейтинг 0–100, краткий вердикт, разбор, совет, список флагов с цитатами.
-- Уточняющие вопросы к уже сделанному скану (Q&A поверх результата).
-- История сканов/анализов в базе, удаление по запросу.
-- Публичная ссылка на отчёт (`/r/<shareId>`) и публичный JSON/PDF для шаринга.
-- OG‑картинка для ссылок (SVG/PNG).
-- Экспорт отчёта в PDF.
-- Оплата разблокировки полного отчёта через ЮKassa, обработка webhook с идемпотентностью.
-- Настройки приватности: согласие на обработку, авто‑удаление по TTL, анонимизация текста перед отправкой в AI.
+> **Portfolio project, built AI-first, and now closed.** The live service (toxiscan.ru) no longer exists, so run it locally (steps below).
+> An honest review of strengths and weaknesses: [docs/AUDIT.md](docs/AUDIT.md). The UI and the AI prompts are in Russian.
 
-## Архитектура
+![Demo](docs/media/demo.gif)
 
-Сервисы и роли:
+## Screenshots
 
-- **server** — Node.js + Express, API, интеграции YandexGPT/ЮKassa, генерация OG/PDF, Prisma.
-- **db** — PostgreSQL.
-- **nginx (edge, опционально)** — reverse proxy и раздача фронта в прод‑схеме (HTTPS + домен).
+| Home | Paste a chat |
+|---|---|
+| ![Home](docs/media/01-home.png) | ![Input](docs/media/02-input.png) |
 
-База данных управляется Prisma migrations (автоприменение при старте server, если не отключено переменной окружения).
+| Result: score, verdict, red flags | Paywall on the full report |
+|---|---|
+| ![Result](docs/media/03-result.png) | ![Paywall](docs/media/04-result-paywall.png) |
 
-## Быстрый старт (локально)
+| SEO landing page | Mobile |
+|---|---|
+| ![Landing](docs/media/05-landing-seo.png) | ![Mobile](docs/media/06-mobile.png) |
 
-Политика проекта: выполнение приложения — только в Docker. На хосте используем команды только для сборки/линта/тайпчека.
+## What it does
 
-### 1) Подготовить `.env`
+- **AI analysis of a conversation.** Risk rating 0–100, short verdict, teaser, full breakdown, advice and a list of flags with quotes and suggested replies.
+- **Screenshot input.** Server-side OCR (Tesseract, Russian and English) turns a chat screenshot into text, and a Telegram export parser normalizes pasted text.
+- **Follow-up questions** on an existing scan (Q&A over the result).
+- **Paid full report (149 RUB).** The free view is redacted **on the server**; payment through YooKassa or Robokassa with an idempotent webhook table.
+- **Sharing.** Public report link `/r/<token>`, Open Graph images (SVG and PNG) rendered on the server, PDF export with a custom font.
+- **Privacy controls.** Explicit consent, optional anonymization of links, emails, phones and @handles before text reaches the AI, per-report auto-delete (TTL).
+- **Auth.** Telegram login, HTTP-only session cookies, double-submit CSRF plus Origin checks, rate limiting.
+- **SEO.** 16 static landing pages for individual manipulation patterns, sitemap, robots and dynamic meta tags.
+- **Resilience for the LLM calls.** Retries, circuit breaker, concurrency limit.
 
-В корне проекта (рядом с `docker-compose.yml`):
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Client | React 18, TypeScript, Vite, Tailwind CSS, SSR prerendering for landing pages |
+| Server | Node.js, Express 5, Prisma 6, PostgreSQL 17 |
+| AI | YandexGPT (REST) |
+| OCR and files | Tesseract, pdfkit, resvg (SVG to PNG) |
+| Payments | YooKassa, Robokassa |
+| Infra | Docker Compose, nginx, Let's Encrypt |
+
+```
+client/   React SPA, SEO landing pages, prerender script
+server/   Express API (src/index.js), YandexGPT service, Prisma schema and migrations
+nginx/    Edge reverse-proxy configs
+docs/     Audit and media
+```
+
+## Run it locally
+
+Requirements: Docker. You need your own YandexGPT credentials for real analyses.
 
 ```bash
 cp .env.example .env
-```
-
-Заполни минимум:
-
-```env
-# PostgreSQL
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_DB=redflag_scanner
-
-# Backend
-PORT=5000
-SESSION_SECRET=replace_me_with_32+_chars_secret
-
-# YandexGPT
-YANDEX_FOLDER_ID=
-YANDEX_API_KEY=
-
-# ЮKassa
-YOOKASSA_SHOP_ID=
-YOOKASSA_SECRET_KEY=
-YOOKASSA_RETURN_URL=http://localhost/
-
-# Webhook защита (обязателен хотя бы один барьер)
-YOOKASSA_WEBHOOK_TOKEN=
-YOOKASSA_WEBHOOK_ALLOWED_CIDRS=
-```
-
-### 2) Поднять API и базу
-
-```bash
+# fill at least: SESSION_SECRET (32+ chars), YANDEX_FOLDER_ID, YANDEX_API_KEY
 docker compose up -d --build
-docker compose ps
-```
-
-Проверка здоровья API:
-
-```bash
 docker compose exec -T server wget -qO- http://localhost:5000/api/health
 ```
 
-Ожидаемый ответ:
-
-```json
-{"ok":true}
-```
-
-### 3) Фронтенд
-
-В репозитории есть сборка фронта (Vite → `client/dist`) и nginx‑конфиги, но **edge‑nginx** рассчитан на прод‑домен и TLS‑сертификаты.
-
-- Для прод‑схемы с доменом и HTTPS используй профиль `edge`:
+Build the frontend (served by the `edge` nginx profile):
 
 ```bash
-docker compose --profile edge up -d --build
+cd client && npm ci && npm run build
+cd .. && docker compose --profile edge up -d
 ```
 
-Требование: в контейнер `nginx` должны быть проброшены реальные сертификаты Let’s Encrypt, а `client/dist` должен существовать (собран заранее).
+Payments need YooKassa or Robokassa credentials, and in production the payment webhook **must** be protected with `PAYMENT_WEBHOOK_TOKEN` and/or `PAYMENT_WEBHOOK_ALLOWED_CIDRS` (the server rejects it otherwise).
 
-Подробный сценарий деплоя: [DEPLOY.md](file:///d:/PROJECT/project1/DEPLOY.md)
+To try the UI without a YandexGPT key, point `YANDEX_GPT_API_URL` at any server that returns the YandexGPT response shape. That is how the screenshots here were produced.
 
-## API
+The full variable reference, API list and deploy notes are in [README.ru.md](README.ru.md) and [DEPLOY.md](DEPLOY.md) (Russian).
 
-База: все запросы идут на тот же origin, что и фронт. Для cookie‑авторизации клиент отправляет `withCredentials=true`.
+## Known limitations
 
-### Auth и CSRF
+This is a closed pet project. Read [docs/AUDIT.md](docs/AUDIT.md) before reusing anything: the whole API is one 5,400-line file, there are no automated tests, and the payment webhook does not re-verify payments with the YooKassa API.
 
-- `GET /api/auth/me` → текущий пользователь или `null`.
-- `GET /api/auth/csrf` → выдаёт CSRF токен и кладёт cookie `csrf`.
-- `POST /api/auth/register` (CSRF) → регистрация, устанавливает `sid` (HTTP‑only cookie) и обновляет CSRF.
-- `POST /api/auth/login` (CSRF) → логин, устанавливает `sid` и обновляет CSRF.
-- `POST /api/auth/logout` (CSRF) → логаут, удаляет `sid` и обновляет CSRF.
+## Privacy note
 
-CSRF защита: двойная отправка cookie + заголовок `X-CSRF-Token`, плюс проверка Origin/Referer на соответствие разрешённым origin.
+Legal pages (`offer.html`, `privacy.html`) contain placeholders instead of the original operator's name, tax ID and email. Replace them before running a real service.
 
-### Сканирование и анализ
+## License
 
-- `POST /api/scan` (auth + CSRF) → создать скан переписки.
-- `GET /api/scan/:id` (auth) → получить свой скан.
-- `DELETE /api/scan/:id` (auth + CSRF) → удалить свой скан.
-- `POST /api/scan/:id/ask` (auth + CSRF) → задать вопрос по результату.
-
-- `POST /api/analyze` (auth + CSRF) → создать анализ (схож с `scan`, используется отдельная сущность).
-- `DELETE /api/analysis/:id` (auth + CSRF) → удалить свой анализ.
-
-### Публичный доступ и файлы
-
-- `GET /r/:token` → HTML‑лендинг для шаринга отчёта.
-- `GET /api/scan/public/:token` → публичный JSON (для не оплаченного контент редактируется).
-- `GET /api/scan/public/:token.pdf` → публичный PDF.
-- `GET /api/og/scan/:token.svg` → OG превью (SVG).
-- `GET /api/og/scan/:token.png` → OG превью (PNG).
-
-### Оплата (ЮKassa)
-
-- `POST /api/pay` (auth + CSRF) → создать оплату для скана или анализа.
-- `POST /api/payment/create` (auth + CSRF) → альтернативный endpoint создания оплаты (для analysis).
-- `POST /api/payment/webhook` → webhook ЮKassa.
-- `POST /api/payment/webhook/:token` → webhook с токеном в URL.
-
-Webhook:
-
-- Верифицируется токеном и/или белым списком CIDR.
-- Идемпотентность: события фиксируются в таблице `payment_webhook_events` (Prisma модель `PaymentWebhookEvent`).
-
-### Служебные
-
-- `GET /api/health` → проверка доступности API и БД.
-
-## Переменные окружения (основные)
-
-Переменные задаются в `.env` в корне проекта и подхватываются `docker-compose.yml`.
-
-### PostgreSQL
-
-- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
-
-### Backend (server)
-
-- `PORT` — порт API внутри контейнера.
-- `SESSION_SECRET` — секрет для хеширования токенов сессии (минимум 32 символа).
-- `CORS_ORIGIN` — список origin через запятую (если пусто, CORS разрешает любой origin).
-- `COOKIE_SECURE` — принудительно ставить Secure cookie (`true/false`), иначе определяется по запросу.
-- `COOKIE_SAMESITE` — `Lax`/`Strict`/`None`.
-- `SESSION_TTL_HOURS` — TTL сессии (по умолчанию 720).
-- `CSRF_TTL_HOURS` — TTL CSRF cookie (по умолчанию 24).
-- `SCAN_RETENTION_HOURS`, `ANALYSIS_RETENTION_HOURS` — авто‑удаление по TTL (часов).
-- `AUTO_DELETE_ENABLED` — включить фон‑удаление записей по `autoDeleteAt`.
-- `AUTO_DELETE_INTERVAL_MS` — интервал фон‑удаления.
-- `DISABLE_PRISMA_MIGRATE=true` — отключить `prisma migrate deploy` при старте.
-
-### YandexGPT
-
-- `YANDEX_FOLDER_ID` — обязателен.
-- Один из вариантов авторизации:
-  - `YANDEX_API_KEY` или `YANDEX_CLOUD_API_KEY`
-  - `YANDEX_IAM_TOKEN`
-- Тюнинг/устойчивость:
-  - `YANDEX_GPT_API_URL`, `YANDEX_GPT_TEMPERATURE`, `YANDEX_GPT_MAX_TOKENS`, `YANDEX_GPT_TIMEOUT_MS`, `YANDEX_GPT_MAX_RETRIES`
-  - `YANDEX_GPT_CB_FAILURES`, `YANDEX_GPT_CB_OPEN_MS`
-  - `YANDEX_GPT_MAX_CONCURRENT`, `YANDEX_GPT_MIN_INTERVAL_MS`
-
-### ЮKassa
-
-- `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY` — обязательно для оплаты.
-- `YOOKASSA_RETURN_URL` — куда возвращать пользователя после оплаты (URL фронтенда).
-- Webhook защита (нужно минимум одно):
-  - `YOOKASSA_WEBHOOK_TOKEN`
-  - `YOOKASSA_WEBHOOK_ALLOWED_CIDRS` (список через запятую)
-
-### Фронтенд (client)
-
-- `VITE_YM_ID` — Yandex Metrika counter id (опционально).
-
-## Разработка: команды (на хосте)
-
-Фронтенд:
-
-```bash
-cd client
-npm ci
-npm run lint
-npm run typecheck
-npm run build
-```
-
-Бэкенд управляется через Docker Compose (см. выше).
-
-## Материалы в репозитории
-
-- [DEPLOY.md](file:///d:/PROJECT/project1/DEPLOY.md) — деплой на Ubuntu/Debian.
-- `docker-compose.yml` — стек (db, server, опциональный edge‑nginx).
-- `server/prisma` — схема БД и миграции.
+[MIT](LICENSE)

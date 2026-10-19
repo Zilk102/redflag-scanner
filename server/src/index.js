@@ -1764,6 +1764,13 @@ function verifyWebhookRequest(req) {
   const expectedToken = typeof process.env.PAYMENT_WEBHOOK_TOKEN === 'string' ? process.env.PAYMENT_WEBHOOK_TOKEN.trim() : '';
   const allowedCidrs = parseAllowedCidrs(process.env.PAYMENT_WEBHOOK_ALLOWED_CIDRS);
 
+  // Без токена и списка IP любой мог бы прислать поддельное payment.succeeded и открыть платный отчёт.
+  if (process.env.NODE_ENV === 'production' && !expectedToken && allowedCidrs.length === 0) {
+    const err = new Error('Webhook: не настроена защита (PAYMENT_WEBHOOK_TOKEN или PAYMENT_WEBHOOK_ALLOWED_CIDRS)');
+    err.statusCode = 403;
+    throw err;
+  }
+
   if (expectedToken) {
     const tokenFromPath = typeof req.params?.token === 'string' ? req.params.token.trim() : '';
     const tokenFromQuery = typeof req.query?.token === 'string' ? req.query.token.trim() : '';
